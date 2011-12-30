@@ -1,9 +1,3 @@
-commit a21657e3f6eae7097d59d9ec56c32ce97fd37ece
-Author: Martin Pihlak <martin.pihlak@gmail.com>
-Date:   Sun Dec 4 23:12:20 2011 +0200
-
-    Provide hook for intercepting log messages.
-
 diff --git a/src/backend/utils/error/elog.c b/src/backend/utils/error/elog.c
 index d8d059f..472aa8e 100644
 --- a/src/backend/utils/error/elog.c
