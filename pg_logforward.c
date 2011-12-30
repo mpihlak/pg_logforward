@@ -1,10 +1,10 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 
+#include <unistd.h>
+#include <fcntl.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
-#include <stdio.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 
@@ -28,8 +28,8 @@ void _PG_init(void);
 static emit_log_hook_type	prev_emit_log_hook = NULL;
 static struct				sockaddr_in si_remote;
 static int					log_socket = -1;
-static int					remote_port;
-static char				   *remote_ip;
+static int					remote_port = DEFAULT_REMOTE_PORT;
+static char				   *remote_ip = DEFAULT_REMOTE_IP;
 
 static void emit_log(ErrorData *edata);
 
@@ -47,29 +47,53 @@ _PG_init(void)
     /*
      * Define (or redefine) custom GUC variables.
      */
-	DefineCustomStringVariable("pg_logforward.remote_host",
+
+	DefineCustomStringVariable("logforward.remote_host",
 							"Remote IP address where logs are forwarded",
 							NULL,
 							&remote_ip,
-							DEFAULT_REMOTE_IP,
-							PGC_SIGHUP,
-							0,
-							NULL,
+#if PG_VERSION_NUM >= 80400
+							DEFAULT_REMOTE_IP,	/* bootValue since 8.4 */
+#endif
+#if PG_VERSION_NUM >= 80400
+							PGC_BACKEND,
+							0,					/* flags parameter since 8.4 */
+#else
+							PGC_USERSET,		/* 8.3 only allows USERSET custom params */
+#endif
+#if PG_VERSION_NUM >= 90100
+							NULL,				/* check_hook parameter since 9.1 */
+#endif
 							NULL,
 							NULL);
 
-	DefineCustomIntVariable("pg_logforward.remote_port",
+	DefineCustomIntVariable("logforward.remote_port",
 							"Remote port where logs are forwarded",
 							NULL,
 							&remote_port,
-							DEFAULT_REMOTE_PORT,
+#if PG_VERSION_NUM >= 80400
+							DEFAULT_REMOTE_PORT,	/* bootValue since 8.4 */
+#endif
 							1,
 							65535,
-							PGC_SIGHUP,
+#if PG_VERSION_NUM >= 80400
+							PGC_BACKEND,
 							0,
-							NULL,
+#else
+							PGC_USERSET,			/* 8.3 only allows USERSET custom params */
+#endif
+#if PG_VERSION_NUM >= 90100
+							NULL,					/* check_hook parameter since 9.1 */
+#endif
 							NULL,
 							NULL);
+
+	fprintf(stderr, "pg_logforward: forwarding to %s:%d\n", remote_ip, remote_port);
+	if (!remote_ip)
+		remote_ip = DEFAULT_REMOTE_IP;
+	if (remote_port <= 0)
+		remote_port = DEFAULT_REMOTE_PORT;
+
 
 	/* Set up the logging socket */
 	if ((log_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0)
@@ -83,8 +107,6 @@ _PG_init(void)
 
 	if (inet_aton(remote_ip, &si_remote.sin_addr) == 0)
 		fprintf(stderr, "pg_logforward: invalid target address: %s\n", remote_ip);
-	else
-		fprintf(stderr, "pg_logforward: initialized.\n");
 }
 
 /*
@@ -115,13 +137,15 @@ emit_log(ErrorData *edata)
 	json_object_object_add(msg, "debug_query_string", JSONSTR(debug_query_string));
 	json_object_object_add(msg, "elevel", json_object_new_int(edata->elevel));
 	json_object_object_add(msg, "funcname", JSONSTR(edata->funcname));
-	json_object_object_add(msg, "domain", JSONSTR(edata->domain));
 	json_object_object_add(msg, "sqlerrcode", json_object_new_int(edata->sqlerrcode));
 	json_object_object_add(msg, "message", JSONSTR(edata->message));
 	json_object_object_add(msg, "detail", JSONSTR(edata->detail));
-	json_object_object_add(msg, "detail_log", JSONSTR(edata->detail_log));
 	json_object_object_add(msg, "hint", JSONSTR(edata->hint));
 	json_object_object_add(msg, "context", JSONSTR(edata->context));
+#if PG_VERSION_NUM >= 80400
+	json_object_object_add(msg, "domain", JSONSTR(edata->domain));
+	json_object_object_add(msg, "detail_log", JSONSTR(edata->detail_log));
+#endif
 
 	buf = json_object_to_json_string(msg);
 
