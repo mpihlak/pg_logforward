@@ -10,11 +10,15 @@ class JSONLogServer(SocketServer.BaseRequestHandler):
     def handle(self):
         data = self.request[0].strip()
 
+        print("json message: %s" % data)
+
         try:
             msg = json.loads(data)
-            print "msg: %s\n" % msg
+            print("parsed message:")
+            for k in msg.keys():
+                print(" %s: %s" % (k, msg[k]))
         except Exception, e:
-            print e
+            print(e)
 
 if __name__ == "__main__":
     HOST, PORT = "localhost", 23456
