@@ -17,10 +17,10 @@
 
 PG_MODULE_MAGIC;
 
-#define JSONSTR(s)	json_object_new_string((s) ? (s) : "")
-
 #define DEFAULT_REMOTE_PORT	23456
 #define DEFAULT_REMOTE_IP	"127.0.0.1"
+
+#define JSONSTR(s)	json_object_new_string((s) ? (s) : "")
 
 
 void _PG_init(void);
@@ -49,64 +49,63 @@ _PG_init(void)
      */
 
 	DefineCustomStringVariable("logforward.remote_host",
-							"Remote IP address where logs are forwarded",
-							NULL,
-							&remote_ip,
+			"Remote IP address where logs are forwarded",
+			NULL,
+			&remote_ip,
 #if PG_VERSION_NUM >= 80400
-							DEFAULT_REMOTE_IP,	/* bootValue since 8.4 */
+			DEFAULT_REMOTE_IP,	/* bootValue since 8.4 */
 #endif
 #if PG_VERSION_NUM >= 80400
-							PGC_BACKEND,
-							0,					/* flags parameter since 8.4 */
+			PGC_BACKEND,
+			0,					/* flags parameter since 8.4 */
 #else
-							PGC_USERSET,		/* 8.3 only allows USERSET custom params */
+			PGC_USERSET,		/* 8.3 only allows USERSET custom params */
 #endif
 #if PG_VERSION_NUM >= 90100
-							NULL,				/* check_hook parameter since 9.1 */
+			NULL,				/* check_hook parameter since 9.1 */
 #endif
-							NULL,
-							NULL);
+			NULL,
+			NULL);
 
 	DefineCustomIntVariable("logforward.remote_port",
-							"Remote port where logs are forwarded",
-							NULL,
-							&remote_port,
+			"Remote port where logs are forwarded",
+			NULL,
+			&remote_port,
 #if PG_VERSION_NUM >= 80400
-							DEFAULT_REMOTE_PORT,	/* bootValue since 8.4 */
+			DEFAULT_REMOTE_PORT, /* bootValue since 8.4 */
 #endif
-							1,
-							65535,
+			1,
+			65535,
 #if PG_VERSION_NUM >= 80400
-							PGC_BACKEND,
-							0,
+			PGC_BACKEND,
+			0,
 #else
-							PGC_USERSET,			/* 8.3 only allows USERSET custom params */
+			PGC_USERSET,		/* 8.3 only allows USERSET custom params */
 #endif
 #if PG_VERSION_NUM >= 90100
-							NULL,					/* check_hook parameter since 9.1 */
+			NULL,				/* check_hook parameter since 9.1 */
 #endif
-							NULL,
-							NULL);
-
-	fprintf(stderr, "pg_logforward: forwarding to %s:%d\n", remote_ip, remote_port);
-	if (!remote_ip)
-		remote_ip = DEFAULT_REMOTE_IP;
-	if (remote_port <= 0)
-		remote_port = DEFAULT_REMOTE_PORT;
-
+			NULL,
+			NULL);
 
 	/* Set up the logging socket */
 	if ((log_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0)
-		fprintf(stderr, "pg_logforward: cannot create socket: %s\n", strerror(errno));
+		fprintf(stderr, "pg_logforward: cannot create socket: %s\n",
+				strerror(errno));
 	else if (fcntl(log_socket, F_SETFL, O_NONBLOCK) == -1)
-		fprintf(stderr, "pg_logforward: cannot set socket nonblocking: %s\n", strerror(errno));
+		fprintf(stderr, "pg_logforward: cannot set socket nonblocking: %s\n",
+				strerror(errno));
 
 	memset((char *) &si_remote, 0, sizeof(si_remote));
 	si_remote.sin_family = AF_INET;
 	si_remote.sin_port = htons(remote_port);
 
 	if (inet_aton(remote_ip, &si_remote.sin_addr) == 0)
-		fprintf(stderr, "pg_logforward: invalid target address: %s\n", remote_ip);
+		fprintf(stderr, "pg_logforward: invalid target address: %s\n",
+				remote_ip);
+	else
+		fprintf(stderr, "pg_logforward: forwarding to %s:%d\n",
+				remote_ip, remote_port);
 }
 
 /*
