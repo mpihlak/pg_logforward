@@ -1,0 +1,50 @@
+commit a21657e3f6eae7097d59d9ec56c32ce97fd37ece
+Author: Martin Pihlak <martin.pihlak@gmail.com>
+Date:   Sun Dec 4 23:12:20 2011 +0200
+
+    Provide hook for intercepting log messages.
+
+diff --git a/src/backend/utils/error/elog.c b/src/backend/utils/error/elog.c
+index d8d059f..472aa8e 100644
+--- a/src/backend/utils/error/elog.c
++++ b/src/backend/utils/error/elog.c
+@@ -136,6 +136,8 @@ static int	errordata_stack_depth = -1; /* index of topmost active frame */
+ 
+ static int	recursion_depth = 0;	/* to detect actual recursion */
+ 
++emit_log_hook_type	emit_log_hook = NULL;	/* hook for log interception */
++
+ /* buffers for formatted timestamps that might be used by both
+  * log_line_prefix and csv logs.
+  */
+@@ -1276,6 +1278,9 @@ EmitErrorReport(void)
+ 	CHECK_STACK_DEPTH();
+ 	oldcontext = MemoryContextSwitchTo(ErrorContext);
+ 
++	if (emit_log_hook)
++		emit_log_hook(edata);
++
+ 	/* Send to server log, if enabled */
+ 	if (edata->output_to_server)
+ 		send_message_to_server_log(edata);
+diff --git a/src/include/utils/elog.h b/src/include/utils/elog.h
+index 93b141d..f04913c 100644
+--- a/src/include/utils/elog.h
++++ b/src/include/utils/elog.h
+@@ -327,6 +327,8 @@ typedef struct ErrorData
+ 	int			saved_errno;	/* errno at entry */
+ } ErrorData;
+ 
++typedef void (*emit_log_hook_type)(ErrorData *edata);
++
+ extern void EmitErrorReport(void);
+ extern ErrorData *CopyErrorData(void);
+ extern void FreeErrorData(ErrorData *edata);
+@@ -347,6 +349,7 @@ typedef enum
+ extern int	Log_error_verbosity;
+ extern char *Log_line_prefix;
+ extern int	Log_destination;
++extern emit_log_hook_type	emit_log_hook;
+ 
+ /* Log destination bitmap */
+ #define LOG_DESTINATION_STDERR	 1

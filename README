@@ -1,0 +1,28 @@
+Introduction
+============
+pg_logforward is a custom logging handler for PostgreSQL. It intercepts
+all PostgreSQL log messages by hooking into EmitErrorReport() function
+in the backend. The intercepted log messages are forwarded via UDP to
+a remote location.
+
+Requires PostgreSQL logging hooks patch - included in the patches directory.
+The patch is against 9.2devel but also applies against 9.1 and 8.3. Although
+some offsets are expected.
+
+Output formats
+==============
+The current version only supports JSON output and requires json-c library to
+be present in the system. There are plans to replace the JSON with tnetstrings
+as they are much cheaper to generate and parse. See: http://tnetstrings.org/
+
+Usage
+=====
+Modify postgresql.conf to include:
+
+shared_preload_libraries = 'pg_logforward'	# requires restart
+custom_variable_classes = 'pg_logforward'	# deprecated in 9.2
+pg_logforward.remote_host = 127.0.0.1		# no host names at this time
+pg_logforward.remote_port = 23456
+
+Note that you need to copy the shared library also to $libdir/plugins if you
+are planning to use local_preload_libraries instead of shared_preload_libraries.

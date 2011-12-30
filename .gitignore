@@ -1,0 +1,5 @@
+.vimrc
+*.o
+*.so
+*.sw[opq]
+.deps
