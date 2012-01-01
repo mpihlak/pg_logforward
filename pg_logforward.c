@@ -38,6 +38,7 @@ void defineIntVariable(const char *name, const char *short_desc, int *value_addr
 
 static emit_log_hook_type	prev_emit_log_hook = NULL;
 static LogTarget		   *log_targets = NULL;
+static char				   *log_target_names = "";
 
 
 /* Convinience wrapper for DefineCustomStringVariable */
@@ -98,19 +99,24 @@ void defineIntVariable(	const char *name,
 void
 _PG_init(void)
 {
-	LogTarget	*tail = log_targets;
-	char		*target_names = "";
-	char		*tgname;
+	LogTarget	   *tail = log_targets;
+	char		   *tgname;
+	char			target_names[1024];
+	MemoryContext	mctx;
 
 	/* Install Hooks */
 	prev_emit_log_hook = emit_log_hook;
 	emit_log_hook = emit_log;
 
+	mctx = MemoryContextSwitchTo(TopMemoryContext);
+
 	defineStringVariable("logforward.target_names",
 						 "List of log forwarding destination names",
-						 &target_names);
+						 &log_target_names);
 
-	fprintf(stderr, "pg_logforward: target names: %s\n", target_names);
+	/* Use a local copy for string tokenization */
+	strncpy(target_names, log_target_names, sizeof(target_names));
+	target_names[sizeof(target_names)-1] = '\0';
 
 	/*
 	 * Set up the log targets.
@@ -118,8 +124,8 @@ _PG_init(void)
 	for (tgname = strtok(target_names, ","); tgname != NULL;
 		 tgname = strtok(NULL, ","))
 	{
-		LogTarget  *target = MemoryContextAlloc(TopMemoryContext, sizeof(LogTarget));
-		char		buf[1024];
+		LogTarget  *target = palloc(sizeof(LogTarget));
+		char		buf[64];
 
 		target->name = tgname;
 		target->next = NULL;
@@ -127,15 +133,25 @@ _PG_init(void)
 		fprintf(stderr, "setting up target %s\n", tgname);
 
 		/* Obtain the target specific GUC settings */
-		snprintf(buf, sizeof(buf), "logforward.%s_remote_host", tgname);
+		snprintf(buf, sizeof(buf), "logforward.%s_host", tgname);
 		defineStringVariable(buf, 
 							 "Remote IP address where logs are forwarded",
 							 &target->remote_ip);
+		if (!target->remote_ip)
+		{
+			fprintf(stderr, "pg_logforward: %s: no target ip address defined.\n", tgname);
+			continue;
+		}
 
-		snprintf(buf, sizeof(buf), "logforward.%s_remote_port", tgname);
+		snprintf(buf, sizeof(buf), "logforward.%s_port", tgname);
 		defineIntVariable(	buf,
 							 "Remote port where logs are forwarded",
 							 &target->remote_port);
+		if (!target->remote_port)
+		{
+			fprintf(stderr, "pg_logforward: %s: no target port defined.\n", tgname);
+			continue;
+		}
 
 		/* Set up the logging socket */
 		if ((target->log_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0)
@@ -170,6 +186,8 @@ _PG_init(void)
 			log_targets = target;
 		tail = target;
 	}
+
+	MemoryContextSwitchTo(mctx);
 }
 
 /*
@@ -210,10 +228,7 @@ emit_log(ErrorData *edata)
 			json_object_object_add(msg, "detail", JSONSTR(edata->detail));
 			json_object_object_add(msg, "hint", JSONSTR(edata->hint));
 			json_object_object_add(msg, "context", JSONSTR(edata->context));
-#if PG_VERSION_NUM >= 80400
-			json_object_object_add(msg, "domain", JSONSTR(edata->domain));
-			json_object_object_add(msg, "detail_log", JSONSTR(edata->detail_log));
-#endif
+
 			buf = json_object_to_json_string(msg);
 		}
 
