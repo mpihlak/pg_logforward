@@ -21,8 +21,16 @@ Modify postgresql.conf to include:
 
 shared_preload_libraries = 'pg_logforward'	# requires restart
 custom_variable_classes = 'logforward'		# deprecated in 9.2
-logforward.remote_host = '127.0.0.1'		# no host names at this time
-logforward.remote_port = 23456
+
+logforward.target_names = 'logsrv,statsrv'
+
+logforward.logsrv_host = '127.0.0.1'
+logforward.logsrv_port = 23456
+logforward.logsrv_min_elevel = 19               # only WARNINGS and above
+
+logforward.statsrv_host = '127.0.0.1'
+logforward.statsrv_port = 23457
+logforward.statsrv_message_filter = 'connection'
 
 Note that you need to copy the shared library also to $libdir/plugins if you
 are planning to use local_preload_libraries instead of shared_preload_libraries.

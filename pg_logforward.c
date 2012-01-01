@@ -27,6 +27,10 @@ typedef struct LogTarget {
 	int					remote_port;
 	int					log_socket;
 	struct sockaddr_in	si_remote;
+
+	/* Log filtering */
+	int					min_elevel;
+	char			   *message_filter;
 } LogTarget;
 
 
@@ -129,6 +133,8 @@ _PG_init(void)
 
 		target->name = tgname;
 		target->next = NULL;
+		target->min_elevel = 0;
+		target->message_filter = NULL;
 
 		fprintf(stderr, "setting up target %s\n", tgname);
 
@@ -152,6 +158,16 @@ _PG_init(void)
 			fprintf(stderr, "pg_logforward: %s: no target port defined.\n", tgname);
 			continue;
 		}
+
+		snprintf(buf, sizeof(buf), "logforward.%s_min_elevel", tgname);
+		defineIntVariable(	buf,
+							 "Minimum elevel that will be forwarded",
+							 &target->min_elevel);
+
+		snprintf(buf, sizeof(buf), "logforward.%s_message_filter", tgname);
+		defineStringVariable(buf, 
+							 "Messages to be filtered for this target",
+							 &target->message_filter);
 
 		/* Set up the logging socket */
 		if ((target->log_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0)
@@ -213,6 +229,14 @@ emit_log(ErrorData *edata)
 	 */
 	for (t = log_targets; t != NULL; t = t->next)
 	{
+		/* Skip messages with too low severity */
+		if (edata->elevel < t->min_elevel)
+			continue;
+
+		/* Skip uninteresting messages */
+		if (t->message_filter && !strstr(edata->message, t->message_filter))
+			continue;
+
 		if (!msg)
 		{
 			msg = json_object_new_object();
