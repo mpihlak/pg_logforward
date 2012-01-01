@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-import SocketServer, json
+import sys, SocketServer, json
 
 class JSONLogServer(SocketServer.BaseRequestHandler):
     """
@@ -21,6 +21,12 @@ class JSONLogServer(SocketServer.BaseRequestHandler):
             print(e)
 
 if __name__ == "__main__":
-    HOST, PORT = "localhost", 23456
+    
+    if len(sys.argv) < 2:
+        PORT = 23456
+    else:
+        PORT = int(sys.argv[1])
+    HOST = "localhost"
+    print("Listening on %s:%s" % (HOST, PORT))
     server = SocketServer.UDPServer((HOST, PORT), JSONLogServer)
     server.serve_forever()
