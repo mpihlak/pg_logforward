@@ -18,7 +18,19 @@
 
 PG_MODULE_MAGIC;
 
+#define DEFAULT_PAYLOAD_FORMAT	"json"
+#define DEFAULT_FORMAT_FUNC		format_json
+
+#define MAX_SYSLOG_MESSAGE		8192
+#define MAX_NETSTR_MESSAGE		8192
+
 #define JSONSTR(s)	json_object_new_string((s) ? (s) : "")
+#define NETSTR(buf, size, value) \
+					snprintf(buf, size, "%u:%s,", \
+						(unsigned)((value) ? strlen(value) : 0), \
+						(value) ? (value) : "")
+
+typedef const char *(*format_payload_t)(ErrorData *e);
 
 typedef struct LogTarget {
 	struct LogTarget   *next;
@@ -27,28 +39,38 @@ typedef struct LogTarget {
 	int					remote_port;
 	int					log_socket;
 	struct sockaddr_in	si_remote;
+	char			   *log_format;
 
 	/* Log filtering */
 	int					min_elevel;
 	char			   *message_filter;
+
+	/* Formatting functions */
+	format_payload_t	format_payload;
 } LogTarget;
 
 
 void _PG_init(void);
 static void emit_log(ErrorData *edata);
-void defineStringVariable(const char *name, const char *short_desc, char **value_addr);
-void defineIntVariable(const char *name, const char *short_desc, int *value_addr);
+static const char *format_json(ErrorData *edata);
+static const char *format_syslog(ErrorData *edata);
+static const char *format_netstr(ErrorData *edata);
+static void defineStringVariable(const char *name, const char *short_desc, char **value_addr);
+static void defineIntVariable(const char *name, const char *short_desc, int *value_addr);
 
 
 static emit_log_hook_type	prev_emit_log_hook = NULL;
 static LogTarget		   *log_targets = NULL;
 static char				   *log_target_names = "";
+static char				   *log_username = NULL;
+static char				   *log_database = NULL;
+static char				   *log_hostname = NULL;
 
 
-/* Convinience wrapper for DefineCustomStringVariable */
-void defineStringVariable(	const char *name,
-							const char *short_desc,
-							char **value_addr)
+/* Convenience wrapper for DefineCustomStringVariable */
+static void defineStringVariable(	const char *name,
+									const char *short_desc,
+									char **value_addr)
 {
 	DefineCustomStringVariable(name,
 			short_desc,
@@ -71,9 +93,9 @@ void defineStringVariable(	const char *name,
 }
 
 /* Convinience wrapper for DefineCustomIntVariable */
-void defineIntVariable(	const char *name,
-						const char *short_desc,
-						int *value_addr)
+static void defineIntVariable(	const char *name,
+								const char *short_desc,
+								int *value_addr)
 {
 	DefineCustomIntVariable(name,
 			short_desc,
@@ -135,6 +157,7 @@ _PG_init(void)
 		target->next = NULL;
 		target->min_elevel = 0;
 		target->message_filter = NULL;
+		target->log_format = DEFAULT_PAYLOAD_FORMAT;
 
 		fprintf(stderr, "setting up target %s\n", tgname);
 
@@ -169,6 +192,11 @@ _PG_init(void)
 							 "Messages to be filtered for this target",
 							 &target->message_filter);
 
+		snprintf(buf, sizeof(buf), "logforward.%s_format", tgname);
+		defineStringVariable(buf, 
+							 "Log format for this target: json, netstr, syslog",
+							 &target->log_format);
+
 		/* Set up the logging socket */
 		if ((target->log_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0)
 		{
@@ -192,8 +220,22 @@ _PG_init(void)
 			fprintf(stderr, "pg_logforward: %s: invalid remote address: %s\n",
 					tgname, target->remote_ip);
 
-		fprintf(stderr, "pg_logforward: forwarding to target %s: %s:%d\n",
-				tgname, target->remote_ip, target->remote_port);
+		/* Determine the log format */
+		if (strcmp(target->log_format, "json") == 0)
+			target->format_payload = format_json;
+		else if (strcmp(target->log_format, "netstr") == 0)
+			target->format_payload = format_netstr;
+		else if (strcmp(target->log_format, "syslog") == 0)
+			target->format_payload = format_syslog;
+		else
+		{
+			fprintf(stderr, "pg_logforward: unknown payload format (%s), using %s",
+				target->log_format, DEFAULT_PAYLOAD_FORMAT);
+			target->format_payload = DEFAULT_FORMAT_FUNC;
+		}
+
+		fprintf(stderr, "pg_logforward: forwarding to target %s: %s:%d, format: %s\n",
+				tgname, target->remote_ip, target->remote_port, target->log_format);
 
 		/* Append the new target to the list of targets */
 		if (tail)
@@ -207,21 +249,100 @@ _PG_init(void)
 }
 
 /*
+ * Format the edata as JSON
+ */
+static const char *format_json(ErrorData *edata)
+{
+	static json_object	*msg = NULL;
+
+	/*
+	 * Release any leftovers from previous formatting. 
+	 *
+	 * Note that there is some point in keeping the msg object
+	 * around in case there are multiple JSON targets. It is
+	 * easy enough to do, but for now don't bother.
+	 */
+	if (msg)
+		json_object_put(msg);
+
+	msg = json_object_new_object();
+
+	json_object_object_add(msg, "username", JSONSTR(log_username));
+	json_object_object_add(msg, "database", JSONSTR(log_database));
+	json_object_object_add(msg, "remotehost", JSONSTR(log_hostname));
+	json_object_object_add(msg, "debug_query_string", JSONSTR(debug_query_string));
+	json_object_object_add(msg, "elevel", json_object_new_int(edata->elevel));
+	json_object_object_add(msg, "funcname", JSONSTR(edata->funcname));
+	json_object_object_add(msg, "sqlerrcode", json_object_new_int(edata->sqlerrcode));
+	json_object_object_add(msg, "message", JSONSTR(edata->message));
+	json_object_object_add(msg, "detail", JSONSTR(edata->detail));
+	json_object_object_add(msg, "hint", JSONSTR(edata->hint));
+	json_object_object_add(msg, "context", JSONSTR(edata->context));
+
+	return json_object_to_json_string(msg);
+}
+
+/*
+ * Format the payload as standard syslog message.
+ * See: http://tools.ietf.org/html/rfc5424
+ */
+static const char *format_syslog(ErrorData *edata)
+{
+	static char msg[MAX_SYSLOG_MESSAGE];
+
+	snprintf(msg, sizeof(msg), "<syslog> %s", edata->message);
+	return msg;
+}
+
+/*
+ * Format the payload as set of netstrings. No fancy stuff, just
+ * one field after another: elevel, sqlerrcode, user, database, host,
+ * funcname, message, detail, hint, context, debug_query_string
+ */
+static const char *format_netstr(ErrorData *edata)
+{
+	static char	msg[MAX_NETSTR_MESSAGE];
+	char		intbuf[16];
+	char	   *intptr = intbuf;	/* hack to suppress compiler warning */
+	int			len = 0;
+
+	snprintf(intbuf, sizeof(intbuf), "%d", edata->elevel);
+	len += NETSTR(msg+len, sizeof(msg)-len, intptr);
+	snprintf(intbuf, sizeof(intbuf), "%d", edata->sqlerrcode);
+	len += NETSTR(msg+len, sizeof(msg)-len, intptr);
+
+	len += NETSTR(msg+len, sizeof(msg)-len, log_username);
+	len += NETSTR(msg+len, sizeof(msg)-len, log_database);
+	len += NETSTR(msg+len, sizeof(msg)-len, log_hostname);
+	len += NETSTR(msg+len, sizeof(msg)-len, edata->funcname);
+	len += NETSTR(msg+len, sizeof(msg)-len, edata->message);
+	len += NETSTR(msg+len, sizeof(msg)-len, edata->detail);
+	len += NETSTR(msg+len, sizeof(msg)-len, edata->hint);
+	len += NETSTR(msg+len, sizeof(msg)-len, edata->context);
+	len += NETSTR(msg+len, sizeof(msg)-len, debug_query_string);
+
+	return msg;
+}
+
+/*
  * Handler for intercepting EmitErrorReport.
  */
 static void
 emit_log(ErrorData *edata)
 {
-	const char	*log_database = MyProcPort ? MyProcPort->database_name : "";
-	const char	*log_hostname = MyProcPort ? MyProcPort->remote_host : "";
-	const char	*log_username = MyProcPort ? MyProcPort->user_name : "";
 	const char	*buf = NULL;
-	json_object	*msg = NULL;
 	LogTarget   *t;
 
 	/* Call any previous hooks */
 	if (prev_emit_log_hook)
 		prev_emit_log_hook(edata);
+
+	if (MyProcPort)
+	{
+		log_database = MyProcPort->database_name;
+		log_hostname = MyProcPort->remote_host;
+		log_username = MyProcPort->user_name;
+	}
 
 	/*
 	 * Loop through the log targets, send the message if all 
@@ -237,30 +358,11 @@ emit_log(ErrorData *edata)
 		if (t->message_filter && !strstr(edata->message, t->message_filter))
 			continue;
 
-		if (!msg)
-		{
-			msg = json_object_new_object();
-
-			json_object_object_add(msg, "username", JSONSTR(log_username));
-			json_object_object_add(msg, "database", JSONSTR(log_database));
-			json_object_object_add(msg, "remotehost", JSONSTR(log_hostname));
-			json_object_object_add(msg, "debug_query_string", JSONSTR(debug_query_string));
-			json_object_object_add(msg, "elevel", json_object_new_int(edata->elevel));
-			json_object_object_add(msg, "funcname", JSONSTR(edata->funcname));
-			json_object_object_add(msg, "sqlerrcode", json_object_new_int(edata->sqlerrcode));
-			json_object_object_add(msg, "message", JSONSTR(edata->message));
-			json_object_object_add(msg, "detail", JSONSTR(edata->detail));
-			json_object_object_add(msg, "hint", JSONSTR(edata->hint));
-			json_object_object_add(msg, "context", JSONSTR(edata->context));
-
-			buf = json_object_to_json_string(msg);
-		}
+		buf = t->format_payload(edata);
 
 		if (sendto(t->log_socket, buf, strlen(buf), 0, &t->si_remote, sizeof(t->si_remote)) < 0)
 			fprintf(stderr, "pg_logforward: sendto: %s\n", strerror(errno));
-	}
 
-	if (msg)
-		json_object_put(msg);
+	}
 }
 
