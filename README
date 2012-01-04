@@ -11,9 +11,9 @@ some offsets are expected.
 
 Output formats
 ==============
-The current version only supports JSON output and requires json-c library to
-be present in the system. There are plans to replace the JSON with tnetstrings
-as they are much cheaper to generate and parse. See: http://tnetstrings.org/
+The current version supports JSON and netstring output formats and requires
+json-c library to be present in the system (will remove that dependency in
+time). Syslog format support is underway.
 
 Usage
 =====
