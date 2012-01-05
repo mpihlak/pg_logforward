@@ -28,6 +28,7 @@ logforward.syslog_host = '127.0.0.1'
 logforward.syslog_port = 23456
 logforward.syslog_min_elevel = 19               # WARNING and above
 logforward.syslog_format = 'syslog'     
+logforward.syslog_facility = 'local1'     
 
 logforward.jsonsrv_host = '127.0.0.1'
 logforward.jsonsrv_port = 23457

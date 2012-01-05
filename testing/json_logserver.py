@@ -36,7 +36,7 @@ class JSONLogServer(SocketServer.BaseRequestHandler):
             print("netstr parsing error: %s" % e)
 
     def handle_syslog(self, data):
-        print("no syslog handler")
+        pass
 
     def handle(self):
         data = self.request[0].strip()

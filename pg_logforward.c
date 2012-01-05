@@ -8,6 +8,9 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 
+#define SYSLOG_NAMES
+#include <syslog.h>
+
 #include <json/json.h>
 
 #include "postgres.h"
@@ -18,6 +21,7 @@
 
 PG_MODULE_MAGIC;
 
+#define DEFAULT_SYSLOG_FACILITY	"local0"
 #define DEFAULT_PAYLOAD_FORMAT	"json"
 #define DEFAULT_FORMAT_FUNC		format_json
 
@@ -40,6 +44,8 @@ typedef struct LogTarget {
 	int					log_socket;
 	struct sockaddr_in	si_remote;
 	char			   *log_format;
+	char			   *syslog_facility;
+	int					facility_id;
 
 	/* Log filtering */
 	int					min_elevel;
@@ -65,6 +71,7 @@ static char				   *log_target_names = "";
 static char				   *log_username = NULL;
 static char				   *log_database = NULL;
 static char				   *log_hostname = NULL;
+static char					my_hostname[64];
 
 
 /* Convenience wrapper for DefineCustomStringVariable */
@@ -144,6 +151,10 @@ _PG_init(void)
 	strncpy(target_names, log_target_names, sizeof(target_names));
 	target_names[sizeof(target_names)-1] = '\0';
 
+	/* Obtain my hostname for syslogging */
+	if (gethostname(my_hostname, sizeof(my_hostname)) != 0)
+		snprintf(my_hostname, sizeof(my_hostname), "[unknown]");
+
 	/*
 	 * Set up the log targets.
 	 */
@@ -157,9 +168,9 @@ _PG_init(void)
 		target->next = NULL;
 		target->min_elevel = 0;
 		target->message_filter = NULL;
+		target->syslog_facility = DEFAULT_SYSLOG_FACILITY;
+		target->facility_id = -1;
 		target->log_format = DEFAULT_PAYLOAD_FORMAT;
-
-		fprintf(stderr, "setting up target %s\n", tgname);
 
 		/* Obtain the target specific GUC settings */
 		snprintf(buf, sizeof(buf), "logforward.%s_host", tgname);
@@ -197,6 +208,11 @@ _PG_init(void)
 							 "Log format for this target: json, netstr, syslog",
 							 &target->log_format);
 
+		snprintf(buf, sizeof(buf), "logforward.%s_facility", tgname);
+		defineStringVariable(buf, 
+							 "Syslog facility for syslog targets",
+							 &target->syslog_facility);
+
 		/* Set up the logging socket */
 		if ((target->log_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0)
 		{
@@ -226,7 +242,23 @@ _PG_init(void)
 		else if (strcmp(target->log_format, "netstr") == 0)
 			target->format_payload = format_netstr;
 		else if (strcmp(target->log_format, "syslog") == 0)
+		{
+			CODE   *c;
 			target->format_payload = format_syslog;
+
+			/* Determine the syslog facility */
+			for (c = facilitynames; c->c_name && target->facility_id < 0; c++)
+				if (strcasecmp(c->c_name, target->syslog_facility) == 0)
+					target->facility_id = c->c_val;
+			
+			/* No valid facility found, skip the target */
+			if (target->facility_id < 0)
+			{
+				fprintf(stderr, "pg_logforward: invalid syslog facility: %s\n",
+					target->syslog_facility);
+				break;
+			}
+		}
 		else
 		{
 			fprintf(stderr, "pg_logforward: unknown payload format (%s), using %s",
@@ -289,8 +321,66 @@ static const char *format_json(ErrorData *edata)
 static const char *format_syslog(ErrorData *edata)
 {
 	static char msg[MAX_SYSLOG_MESSAGE];
+	int			severity;
+	int			facility;
+	int			pri = 0;
+	int			len;
+	time_t		now;
+	struct tm  *gmt;
+	char		ts[32];
 
-	snprintf(msg, sizeof(msg), "<syslog> %s", edata->message);
+	time(&now);
+	gmt = gmtime(&now);
+	strftime(ts, sizeof(ts), "%F-%dT%H:%M:%SZ", gmt);
+
+	/* What syslog facility to use? */
+	facility = 16;	/* local0 */
+
+	/* Map the postgres elevel to syslog severity */
+	switch (edata->elevel)
+	{
+        case DEBUG1:
+        case DEBUG2:
+        case DEBUG3:
+        case DEBUG4:
+        case DEBUG5:
+            severity = 7; break;
+        case LOG:
+        case COMMERROR:
+        case INFO:
+            severity = 6; break;
+            break;
+        case NOTICE:
+            severity = 5; break;
+        case WARNING:
+            severity = 4; break;
+        case ERROR:
+            severity = 3; break;
+        case FATAL:
+            severity = 2; break;
+        case PANIC:
+            severity = 0; break;
+		default:
+            severity = 7; break;
+	}
+
+	pri = facility * 8 + severity;
+
+	/*
+	 * Syslog message format:
+	 * PRI VERSION TS HOSTNAME APPNAME PROCID MSGID SDATA MSG
+	 */
+
+	/* header */
+	len = snprintf(msg, sizeof(msg), "<%d>1 %s %s postgres %d %s ",
+		pri, ts, my_hostname, MyProcPid, "-");
+	
+	/* structured data - skip for now */
+	len += snprintf(msg+len, sizeof(msg) - len, "%s ", "-");
+
+	/* message payload */
+	len += snprintf(msg+len, sizeof(msg) - len, "%s", edata->message);
+
 	return msg;
 }
 
