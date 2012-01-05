@@ -34,7 +34,10 @@ PG_MODULE_MAGIC;
 						(unsigned)((value) ? strlen(value) : 0), \
 						(value) ? (value) : "")
 
-typedef const char *(*format_payload_t)(ErrorData *e);
+
+struct LogTarget;	/* Forward declaration */
+
+typedef const char *(*format_payload_t)(struct LogTarget *t, ErrorData *e);
 
 typedef struct LogTarget {
 	struct LogTarget   *next;
@@ -51,16 +54,16 @@ typedef struct LogTarget {
 	int					min_elevel;
 	char			   *message_filter;
 
-	/* Formatting functions */
+	/* Formatting function */
 	format_payload_t	format_payload;
 } LogTarget;
 
 
 void _PG_init(void);
 static void emit_log(ErrorData *edata);
-static const char *format_json(ErrorData *edata);
-static const char *format_syslog(ErrorData *edata);
-static const char *format_netstr(ErrorData *edata);
+static const char *format_json(struct LogTarget *t, ErrorData *edata);
+static const char *format_syslog(struct LogTarget *t, ErrorData *edata);
+static const char *format_netstr(struct LogTarget *t, ErrorData *edata);
 static void defineStringVariable(const char *name, const char *short_desc, char **value_addr);
 static void defineIntVariable(const char *name, const char *short_desc, int *value_addr);
 
@@ -244,12 +247,13 @@ _PG_init(void)
 		else if (strcmp(target->log_format, "syslog") == 0)
 		{
 			CODE   *c;
+
 			target->format_payload = format_syslog;
 
 			/* Determine the syslog facility */
 			for (c = facilitynames; c->c_name && target->facility_id < 0; c++)
 				if (strcasecmp(c->c_name, target->syslog_facility) == 0)
-					target->facility_id = c->c_val;
+					target->facility_id = LOG_FAC(c->c_val);
 			
 			/* No valid facility found, skip the target */
 			if (target->facility_id < 0)
@@ -283,7 +287,7 @@ _PG_init(void)
 /*
  * Format the edata as JSON
  */
-static const char *format_json(ErrorData *edata)
+static const char *format_json(struct LogTarget *target, ErrorData *edata)
 {
 	static json_object	*msg = NULL;
 
@@ -318,53 +322,30 @@ static const char *format_json(ErrorData *edata)
  * Format the payload as standard syslog message.
  * See: http://tools.ietf.org/html/rfc5424
  */
-static const char *format_syslog(ErrorData *edata)
+static const char *format_syslog(struct LogTarget *target, ErrorData *edata)
 {
 	static char msg[MAX_SYSLOG_MESSAGE];
-	int			severity;
-	int			facility;
-	int			pri = 0;
-	int			len;
+	int			pri, len, i;
+	int			severity = -1;
 	time_t		now;
 	struct tm  *gmt;
 	char		ts[32];
 
+	/* Map the postgres elevel to syslog severity */
+	int levels[][2] = {
+		{ DEBUG1, 7 }, { INFO, 6 }, { NOTICE, 5 }, { WARNING, 4},
+		{ ERROR, 3 }, { FATAL, 2 }, { PANIC, 0 },
+	};
+
+	for (i = 0; i < sizeof(levels)/sizeof(levels[0]) && severity < 0; i++)
+		if (edata->elevel <= levels[i][0])
+			severity = levels[i][1];
+
+	pri = target->facility_id * 8 + severity;
+
 	time(&now);
 	gmt = gmtime(&now);
 	strftime(ts, sizeof(ts), "%F-%dT%H:%M:%SZ", gmt);
-
-	/* What syslog facility to use? */
-	facility = 16;	/* local0 */
-
-	/* Map the postgres elevel to syslog severity */
-	switch (edata->elevel)
-	{
-        case DEBUG1:
-        case DEBUG2:
-        case DEBUG3:
-        case DEBUG4:
-        case DEBUG5:
-            severity = 7; break;
-        case LOG:
-        case COMMERROR:
-        case INFO:
-            severity = 6; break;
-            break;
-        case NOTICE:
-            severity = 5; break;
-        case WARNING:
-            severity = 4; break;
-        case ERROR:
-            severity = 3; break;
-        case FATAL:
-            severity = 2; break;
-        case PANIC:
-            severity = 0; break;
-		default:
-            severity = 7; break;
-	}
-
-	pri = facility * 8 + severity;
 
 	/*
 	 * Syslog message format:
@@ -389,7 +370,7 @@ static const char *format_syslog(ErrorData *edata)
  * one field after another: elevel, sqlerrcode, user, database, host,
  * funcname, message, detail, hint, context, debug_query_string
  */
-static const char *format_netstr(ErrorData *edata)
+static const char *format_netstr(struct LogTarget *target, ErrorData *edata)
 {
 	static char	msg[MAX_NETSTR_MESSAGE];
 	char		intbuf[16];
@@ -448,7 +429,7 @@ emit_log(ErrorData *edata)
 		if (t->message_filter && !strstr(edata->message, t->message_filter))
 			continue;
 
-		buf = t->format_payload(edata);
+		buf = t->format_payload(t, edata);
 
 		if (sendto(t->log_socket, buf, strlen(buf), 0, &t->si_remote, sizeof(t->si_remote)) < 0)
 			fprintf(stderr, "pg_logforward: sendto: %s\n", strerror(errno));
