@@ -90,7 +90,7 @@ static void defineStringVariable(	const char *name,
 			NULL,				/* bootValue since 8.4 */
 #endif
 #if PG_VERSION_NUM >= 80400
-			PGC_BACKEND,
+			PGC_SIGHUP,
 			0,					/* flags parameter since 8.4 */
 #else
 			PGC_USERSET,		/* 8.3 only allows USERSET custom params */
@@ -112,12 +112,12 @@ static void defineIntVariable(	const char *name,
 			NULL,
 			value_addr,
 #if PG_VERSION_NUM >= 80400
-			-1, 				/* bootValue since 8.4 */
+			0, 					/* bootValue since 8.4 */
 #endif
-			1,
+			0,
 			65535,
 #if PG_VERSION_NUM >= 80400
-			PGC_BACKEND,
+			PGC_SIGHUP,
 			0,
 #else
 			PGC_USERSET,		/* 8.3 only allows USERSET custom params */
@@ -137,7 +137,7 @@ _PG_init(void)
 {
 	LogTarget	   *tail = log_targets;
 	char		   *tgname;
-	char			target_names[1024];
+	char			target_names[1024] = "";
 	MemoryContext	mctx;
 
 	/* Install Hooks */
@@ -151,8 +151,13 @@ _PG_init(void)
 						 &log_target_names);
 
 	/* Use a local copy for string tokenization */
-	strncpy(target_names, log_target_names, sizeof(target_names));
-	target_names[sizeof(target_names)-1] = '\0';
+	if (log_target_names)
+	{
+		strncpy(target_names, log_target_names, sizeof(target_names));
+		target_names[sizeof(target_names)-1] = '\0';
+	}
+
+	fprintf(stderr, "targets: %s\n", target_names);
 
 	/* Obtain my hostname for syslogging */
 	if (gethostname(my_hostname, sizeof(my_hostname)) != 0)
@@ -161,40 +166,31 @@ _PG_init(void)
 	/*
 	 * Set up the log targets.
 	 */
-	for (tgname = strtok(target_names, ","); tgname != NULL;
-		 tgname = strtok(NULL, ","))
+	for (tgname = strtok(target_names, ","); tgname != NULL; tgname = strtok(NULL, ","))
 	{
 		LogTarget  *target = palloc(sizeof(LogTarget));
 		char		buf[64];
 
 		target->name = tgname;
 		target->next = NULL;
+		target->remote_ip = "";
+		target->remote_port = 0;
 		target->min_elevel = 0;
 		target->message_filter = NULL;
+		target->log_format = DEFAULT_PAYLOAD_FORMAT;
 		target->syslog_facility = DEFAULT_SYSLOG_FACILITY;
 		target->facility_id = -1;
-		target->log_format = DEFAULT_PAYLOAD_FORMAT;
 
 		/* Obtain the target specific GUC settings */
 		snprintf(buf, sizeof(buf), "logforward.%s_host", tgname);
 		defineStringVariable(buf, 
 							 "Remote IP address where logs are forwarded",
 							 &target->remote_ip);
-		if (!target->remote_ip)
-		{
-			fprintf(stderr, "pg_logforward: %s: no target ip address defined.\n", tgname);
-			continue;
-		}
 
 		snprintf(buf, sizeof(buf), "logforward.%s_port", tgname);
 		defineIntVariable(	buf,
 							 "Remote port where logs are forwarded",
 							 &target->remote_port);
-		if (!target->remote_port)
-		{
-			fprintf(stderr, "pg_logforward: %s: no target port defined.\n", tgname);
-			continue;
-		}
 
 		snprintf(buf, sizeof(buf), "logforward.%s_min_elevel", tgname);
 		defineIntVariable(	buf,
@@ -216,7 +212,21 @@ _PG_init(void)
 							 "Syslog facility for syslog targets",
 							 &target->syslog_facility);
 
-		/* Set up the logging socket */
+		/*
+		 * Set up the logging socket
+		 */
+		if (!target->remote_ip)
+		{
+			fprintf(stderr, "pg_logforward: %s: no target ip address defined.\n", tgname);
+			continue;
+		}
+
+		if (!target->remote_port)
+		{
+			fprintf(stderr, "pg_logforward: %s: no target port defined.\n", tgname);
+			continue;
+		}
+
 		if ((target->log_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0)
 		{
 			fprintf(stderr, "pg_logforward: %s: cannot create socket: %s\n",
@@ -239,7 +249,12 @@ _PG_init(void)
 			fprintf(stderr, "pg_logforward: %s: invalid remote address: %s\n",
 					tgname, target->remote_ip);
 
-		/* Determine the log format */
+		/*
+		 * Determine format for logging target.
+		 */
+		if (!target->log_format)
+			target->log_format = DEFAULT_PAYLOAD_FORMAT;
+
 		if (strcmp(target->log_format, "json") == 0)
 			target->format_payload = format_json;
 		else if (strcmp(target->log_format, "netstr") == 0)
@@ -249,6 +264,8 @@ _PG_init(void)
 			CODE   *c;
 
 			target->format_payload = format_syslog;
+			if (!target->syslog_facility)
+				target->syslog_facility = DEFAULT_SYSLOG_FACILITY;
 
 			/* Determine the syslog facility */
 			for (c = facilitynames; c->c_name && target->facility_id < 0; c++)
@@ -272,6 +289,7 @@ _PG_init(void)
 
 		fprintf(stderr, "pg_logforward: forwarding to target %s: %s:%d, format: %s\n",
 				tgname, target->remote_ip, target->remote_port, target->log_format);
+		fprintf(stderr, "min_elevel: %d\n", target->min_elevel);
 
 		/* Append the new target to the list of targets */
 		if (tail)
