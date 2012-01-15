@@ -11,9 +11,7 @@ some offsets are expected.
 
 Output formats
 ==============
-The current version supports JSON and netstring output formats and requires
-json-c library to be present in the system (will remove that dependency in
-time). Syslog format support is underway.
+The current version supports JSON, netstring and Syslog output formats.
 
 Usage
 =====

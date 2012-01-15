@@ -11,8 +11,6 @@
 #define SYSLOG_NAMES
 #include <syslog.h>
 
-#include <json/json.h>
-
 #include "postgres.h"
 #include "tcop/tcopprot.h"
 #include "libpq/libpq.h"
@@ -25,10 +23,8 @@ PG_MODULE_MAGIC;
 #define DEFAULT_PAYLOAD_FORMAT	"json"
 #define DEFAULT_FORMAT_FUNC		format_json
 
-#define MAX_SYSLOG_MESSAGE		8192
-#define MAX_NETSTR_MESSAGE		8192
+#define MAX_MESSAGE_SIZE		8192
 
-#define JSONSTR(s)	json_object_new_string((s) ? (s) : "")
 #define NETSTR(buf, size, value) \
 					snprintf(buf, size, "%u:%s,", \
 						(unsigned)((value) ? strlen(value) : 0), \
@@ -66,6 +62,10 @@ static const char *format_syslog(struct LogTarget *t, ErrorData *edata);
 static const char *format_netstr(struct LogTarget *t, ErrorData *edata);
 static void defineStringVariable(const char *name, const char *short_desc, char **value_addr);
 static void defineIntVariable(const char *name, const char *short_desc, int *value_addr);
+static void escape_json(char **dst, size_t *max, const char *str);
+static void append_string(char **dst, size_t *max, const char *src);
+static void append_json_string(char **buf, size_t *max, const char *key, const char *val, bool addComma);
+static void append_json_int(char **buf, size_t *max, const char *key, int val, bool addComma);
 
 
 static emit_log_hook_type	prev_emit_log_hook = NULL;
@@ -75,6 +75,7 @@ static char				   *log_username = NULL;
 static char				   *log_database = NULL;
 static char				   *log_hostname = NULL;
 static char					my_hostname[64];
+static char					msgbuf[MAX_MESSAGE_SIZE];
 
 
 /* Convenience wrapper for DefineCustomStringVariable */
@@ -289,37 +290,128 @@ _PG_init(void)
 }
 
 /*
+ * Append one string to another, return the number of characters added.
+ *
+ * The value pointed to by max is decreased and 'dst' advanced by the number of
+ * characters added.
+ */
+static void
+append_string(char **dst, size_t *max, const char *src)
+{
+	size_t len;
+
+	if (! *max || !src)
+		return;
+
+	len = strlen(src);
+	if (len >= *max)
+		len = *max - 1;
+
+	strncat(*dst, src, len);
+	*max -= len;
+	*dst += len;
+}
+
+/*
+ * Add a json key/strvalue pair to the buffer.
+ */
+static void
+append_json_string(char **buf, size_t *max, const char *key, const char *val, bool addComma)
+{
+	escape_json(buf, max, key);
+	append_string(buf, max, ": ");
+	if (val)
+		escape_json(buf, max, val ? val : "null");
+	else
+		append_string(buf, max, "null");
+	if (addComma)
+		append_string(buf, max, ", ");
+}
+
+/*
+ * Add a json key/intvalue pair to the buffer.
+ */
+static void
+append_json_int(char **buf, size_t *max, const char *key, int val, bool addComma)
+{
+	char intbuf[16];
+
+	escape_json(buf, max, key);
+	append_string(buf, max, ": ");
+
+	snprintf(intbuf, sizeof(buf), "%d", val);
+	append_string(buf, max, intbuf);
+
+	if (addComma)
+		append_string(buf, max, ", ");
+}
+
+/*
+ * Produce a JSON string literal.
+ */
+static void
+escape_json(char **dst, size_t *max, const char *str)
+{
+	const char *p;
+	char		buf[16];
+
+	append_string(dst, max, "\"");
+	for (p = str; *p; p++)
+	{
+		switch (*p)
+		{
+			case '\b':	append_string(dst, max, "\\b"); break;
+			case '\f':	append_string(dst, max, "\\f"); break;
+			case '\n':	append_string(dst, max, "\\n"); break;
+			case '\r':	append_string(dst, max, "\\r"); break;
+			case '\t':	append_string(dst, max, "\\t"); break;
+			case '"':	append_string(dst, max, "\\\""); break;
+			case '\\':	append_string(dst, max, "\\\\"); break;
+			default:
+				if ((unsigned char) *p < ' ')
+				{
+					snprintf(buf, sizeof(buf), "\\u%04x", (int) *p);
+					append_string(dst, max, buf);
+				}
+				else
+				{
+					buf[0] = *p;
+					buf[1] = '\0';
+					append_string(dst, max, buf);
+				}
+				break;
+		}
+	}
+	append_string(dst, max, "\"");
+}
+
+/*
  * Format the edata as JSON
  */
 static const char *format_json(struct LogTarget *target, ErrorData *edata)
 {
-	static json_object	*msg = NULL;
+	char	   *buf;
+	size_t		len;
 
-	/*
-	 * Release any leftovers from previous formatting. 
-	 *
-	 * Note that there is some point in keeping the msg object
-	 * around in case there are multiple JSON targets. It is
-	 * easy enough to do, but for now don't bother.
-	 */
-	if (msg)
-		json_object_put(msg);
+	buf = msgbuf;
+	len = sizeof(msgbuf);
+	*buf = '\0';
 
-	msg = json_object_new_object();
+	append_string(&buf, &len, "{ ");
+	append_json_string(&buf, &len, "username", log_username, true);
+	append_json_string(&buf, &len, "database", log_database, true);
+	append_json_string(&buf, &len, "remotehost", log_hostname, true);
+	append_json_string(&buf, &len, "debug_query_string", debug_query_string, true);
+	append_json_int(&buf, &len, "elevel", edata->elevel, true);
+	append_json_string(&buf, &len, "funcname", edata->funcname, true);
+	append_json_int(&buf, &len, "sqlerrcode", edata->sqlerrcode, true);
+	append_json_string(&buf, &len, "message", edata->message, true);
+	append_json_string(&buf, &len, "detail", edata->detail, true);
+	append_json_string(&buf, &len, "hint", edata->hint, true);
+	append_json_string(&buf, &len, "context", edata->context, false);
+	append_string(&buf, &len, " }");
 
-	json_object_object_add(msg, "username", JSONSTR(log_username));
-	json_object_object_add(msg, "database", JSONSTR(log_database));
-	json_object_object_add(msg, "remotehost", JSONSTR(log_hostname));
-	json_object_object_add(msg, "debug_query_string", JSONSTR(debug_query_string));
-	json_object_object_add(msg, "elevel", json_object_new_int(edata->elevel));
-	json_object_object_add(msg, "funcname", JSONSTR(edata->funcname));
-	json_object_object_add(msg, "sqlerrcode", json_object_new_int(edata->sqlerrcode));
-	json_object_object_add(msg, "message", JSONSTR(edata->message));
-	json_object_object_add(msg, "detail", JSONSTR(edata->detail));
-	json_object_object_add(msg, "hint", JSONSTR(edata->hint));
-	json_object_object_add(msg, "context", JSONSTR(edata->context));
-
-	return json_object_to_json_string(msg);
+	return msgbuf;
 }
 
 /*
@@ -328,7 +420,6 @@ static const char *format_json(struct LogTarget *target, ErrorData *edata)
  */
 static const char *format_syslog(struct LogTarget *target, ErrorData *edata)
 {
-	static char msg[MAX_SYSLOG_MESSAGE];
 	int			pri, len, i;
 	int			severity = -1;
 	time_t		now;
@@ -357,16 +448,16 @@ static const char *format_syslog(struct LogTarget *target, ErrorData *edata)
 	 */
 
 	/* header */
-	len = snprintf(msg, sizeof(msg), "<%d>1 %s %s postgres %d %s ",
+	len = snprintf(msgbuf, sizeof(msgbuf), "<%d>1 %s %s postgres %d %s ",
 		pri, ts, my_hostname, MyProcPid, "-");
 	
 	/* structured data - skip for now */
-	len += snprintf(msg+len, sizeof(msg) - len, "%s ", "-");
+	len += snprintf(msgbuf+len, sizeof(msgbuf) - len, "%s ", "-");
 
 	/* message payload */
-	len += snprintf(msg+len, sizeof(msg) - len, "%s", edata->message);
+	len += snprintf(msgbuf+len, sizeof(msgbuf) - len, "%s", edata->message);
 
-	return msg;
+	return msgbuf;
 }
 
 /*
@@ -376,27 +467,26 @@ static const char *format_syslog(struct LogTarget *target, ErrorData *edata)
  */
 static const char *format_netstr(struct LogTarget *target, ErrorData *edata)
 {
-	static char	msg[MAX_NETSTR_MESSAGE];
 	char		intbuf[16];
 	char	   *intptr = intbuf;	/* hack to suppress compiler warning */
 	int			len = 0;
 
 	snprintf(intbuf, sizeof(intbuf), "%d", edata->elevel);
-	len += NETSTR(msg+len, sizeof(msg)-len, intptr);
+	len += NETSTR(msgbuf+len, sizeof(msgbuf)-len, intptr);
 	snprintf(intbuf, sizeof(intbuf), "%d", edata->sqlerrcode);
-	len += NETSTR(msg+len, sizeof(msg)-len, intptr);
+	len += NETSTR(msgbuf+len, sizeof(msgbuf)-len, intptr);
 
-	len += NETSTR(msg+len, sizeof(msg)-len, log_username);
-	len += NETSTR(msg+len, sizeof(msg)-len, log_database);
-	len += NETSTR(msg+len, sizeof(msg)-len, log_hostname);
-	len += NETSTR(msg+len, sizeof(msg)-len, edata->funcname);
-	len += NETSTR(msg+len, sizeof(msg)-len, edata->message);
-	len += NETSTR(msg+len, sizeof(msg)-len, edata->detail);
-	len += NETSTR(msg+len, sizeof(msg)-len, edata->hint);
-	len += NETSTR(msg+len, sizeof(msg)-len, edata->context);
-	len += NETSTR(msg+len, sizeof(msg)-len, debug_query_string);
+	len += NETSTR(msgbuf+len, sizeof(msgbuf)-len, log_username);
+	len += NETSTR(msgbuf+len, sizeof(msgbuf)-len, log_database);
+	len += NETSTR(msgbuf+len, sizeof(msgbuf)-len, log_hostname);
+	len += NETSTR(msgbuf+len, sizeof(msgbuf)-len, edata->funcname);
+	len += NETSTR(msgbuf+len, sizeof(msgbuf)-len, edata->message);
+	len += NETSTR(msgbuf+len, sizeof(msgbuf)-len, edata->detail);
+	len += NETSTR(msgbuf+len, sizeof(msgbuf)-len, edata->hint);
+	len += NETSTR(msgbuf+len, sizeof(msgbuf)-len, edata->context);
+	len += NETSTR(msgbuf+len, sizeof(msgbuf)-len, debug_query_string);
 
-	return msg;
+	return msgbuf;
 }
 
 /*

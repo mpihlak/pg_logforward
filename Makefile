@@ -1,7 +1,7 @@
 MODULE_big = pg_logforward
 OBJS = pg_logforward.o
 
-SHLIB_LINK = $(filter, $(LIBS)) -ljson
+SHLIB_LINK = $(filter, $(LIBS))
 
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
