@@ -136,32 +136,23 @@ void
 _PG_init(void)
 {
 	LogTarget	   *tail = log_targets;
-	char		   *tgname;
-	char			target_names[1024] = "";
+	char		   *target_names, *tgname;
 	MemoryContext	mctx;
 
 	/* Install Hooks */
 	prev_emit_log_hook = emit_log_hook;
 	emit_log_hook = emit_log;
 
+	/* Obtain my hostname for syslogging */
+	if (gethostname(my_hostname, sizeof(my_hostname)) != 0)
+		snprintf(my_hostname, sizeof(my_hostname), "[unknown]");
+
 	mctx = MemoryContextSwitchTo(TopMemoryContext);
 
 	defineStringVariable("logforward.target_names",
 						 "List of log forwarding destination names",
 						 &log_target_names);
-
-	/* Use a local copy for string tokenization */
-	if (log_target_names)
-	{
-		strncpy(target_names, log_target_names, sizeof(target_names));
-		target_names[sizeof(target_names)-1] = '\0';
-	}
-
-	fprintf(stderr, "targets: %s\n", target_names);
-
-	/* Obtain my hostname for syslogging */
-	if (gethostname(my_hostname, sizeof(my_hostname)) != 0)
-		snprintf(my_hostname, sizeof(my_hostname), "[unknown]");
+	target_names = pstrdup(log_target_names);
 
 	/*
 	 * Set up the log targets.
@@ -183,33 +174,27 @@ _PG_init(void)
 
 		/* Obtain the target specific GUC settings */
 		snprintf(buf, sizeof(buf), "logforward.%s_host", tgname);
-		defineStringVariable(buf, 
-							 "Remote IP address where logs are forwarded",
+		defineStringVariable(buf, "Remote IP address where logs are forwarded",
 							 &target->remote_ip);
 
 		snprintf(buf, sizeof(buf), "logforward.%s_port", tgname);
-		defineIntVariable(	buf,
-							 "Remote port where logs are forwarded",
+		defineIntVariable(	buf, "Remote port where logs are forwarded",
 							 &target->remote_port);
 
 		snprintf(buf, sizeof(buf), "logforward.%s_min_elevel", tgname);
-		defineIntVariable(	buf,
-							 "Minimum elevel that will be forwarded",
+		defineIntVariable(	buf, "Minimum elevel that will be forwarded",
 							 &target->min_elevel);
 
 		snprintf(buf, sizeof(buf), "logforward.%s_message_filter", tgname);
-		defineStringVariable(buf, 
-							 "Messages to be filtered for this target",
+		defineStringVariable(buf, "Messages to be filtered for this target",
 							 &target->message_filter);
 
 		snprintf(buf, sizeof(buf), "logforward.%s_format", tgname);
-		defineStringVariable(buf, 
-							 "Log format for this target: json, netstr, syslog",
+		defineStringVariable(buf, "Log format for this target: json, netstr, syslog",
 							 &target->log_format);
 
 		snprintf(buf, sizeof(buf), "logforward.%s_facility", tgname);
-		defineStringVariable(buf, 
-							 "Syslog facility for syslog targets",
+		defineStringVariable(buf, "Syslog facility for syslog targets",
 							 &target->syslog_facility);
 
 		/*
@@ -289,7 +274,6 @@ _PG_init(void)
 
 		fprintf(stderr, "pg_logforward: forwarding to target %s: %s:%d, format: %s\n",
 				tgname, target->remote_ip, target->remote_port, target->log_format);
-		fprintf(stderr, "min_elevel: %d\n", target->min_elevel);
 
 		/* Append the new target to the list of targets */
 		if (tail)
@@ -298,6 +282,8 @@ _PG_init(void)
 			log_targets = target;
 		tail = target;
 	}
+
+	pfree(target_names);
 
 	MemoryContextSwitchTo(mctx);
 }
