@@ -490,6 +490,11 @@ format_netstr(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 
 /*
  * Handler for intercepting EmitErrorReport.
+ *
+ * For the moment we're assuming that emit_log() needs to be
+ * re-entrant. Consider a case where a signal is caught while
+ * inside emit_log - the signal handler might want' to log
+ * something.
  */
 static void
 emit_log(ErrorData *edata)
