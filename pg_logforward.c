@@ -65,7 +65,7 @@ static void defineStringVariable(const char *name, const char *short_desc, char 
 static void defineIntVariable(const char *name, const char *short_desc, int *value_addr);
 static void escape_json(char **dst, size_t *max, const char *str);
 static void append_string(char **dst, size_t *max, const char *src);
-static void append_json_string(char **buf, size_t *max, const char *key, const char *val, bool addComma);
+static void append_json_str(char **buf, size_t *max, const char *key, const char *val, bool addComma);
 static void append_json_int(char **buf, size_t *max, const char *key, int val, bool addComma);
 
 
@@ -318,12 +318,12 @@ append_string(char **dst, size_t *max, const char *src)
  * Add a json key/strvalue pair to the buffer.
  */
 static void
-append_json_string(char **buf, size_t *max, const char *key, const char *val, bool addComma)
+append_json_str(char **buf, size_t *max, const char *key, const char *val, bool addComma)
 {
 	escape_json(buf, max, key);
 	append_string(buf, max, ": ");
 	if (val)
-		escape_json(buf, max, val ? val : "null");
+		escape_json(buf, max, val);
 	else
 		append_string(buf, max, "null");
 	if (addComma)
@@ -401,17 +401,17 @@ format_json(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 	len = MAX_MESSAGE_SIZE;
 
 	append_string(&buf, &len, "{ ");
-	append_json_string(&buf, &len, "username", log_username, true);
-	append_json_string(&buf, &len, "database", log_database, true);
-	append_json_string(&buf, &len, "remotehost", log_hostname, true);
-	append_json_string(&buf, &len, "debug_query_string", debug_query_string, true);
+	append_json_str(&buf, &len, "username", log_username, true);
+	append_json_str(&buf, &len, "database", log_database, true);
+	append_json_str(&buf, &len, "remotehost", log_hostname, true);
+	append_json_str(&buf, &len, "debug_query_string", debug_query_string, true);
 	append_json_int(&buf, &len, "elevel", edata->elevel, true);
-	append_json_string(&buf, &len, "funcname", edata->funcname, true);
+	append_json_str(&buf, &len, "funcname", edata->funcname, true);
 	append_json_int(&buf, &len, "sqlerrcode", edata->sqlerrcode, true);
-	append_json_string(&buf, &len, "message", edata->message, true);
-	append_json_string(&buf, &len, "detail", edata->detail, true);
-	append_json_string(&buf, &len, "hint", edata->hint, true);
-	append_json_string(&buf, &len, "context", edata->context, false);
+	append_json_str(&buf, &len, "message", edata->message, true);
+	append_json_str(&buf, &len, "detail", edata->detail, true);
+	append_json_str(&buf, &len, "hint", edata->hint, true);
+	append_json_str(&buf, &len, "context", edata->context, false);
 	append_string(&buf, &len, " }");
 }
 
