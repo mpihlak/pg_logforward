@@ -19,9 +19,10 @@
 
 PG_MODULE_MAGIC;
 
-#define DEFAULT_SYSLOG_FACILITY	"local0"
 #define DEFAULT_PAYLOAD_FORMAT	"json"
 #define DEFAULT_FORMAT_FUNC		format_json
+
+#define DEFAULT_SYSLOG_FACILITY	"local0"
 
 #define MAX_MESSAGE_SIZE		8192
 
@@ -33,7 +34,7 @@ PG_MODULE_MAGIC;
 
 struct LogTarget;	/* Forward declaration */
 
-typedef const char *(*format_payload_t)(struct LogTarget *t, ErrorData *e);
+typedef void (*format_payload_t)(struct LogTarget *t, ErrorData *e, char *msgbuf);
 
 typedef struct LogTarget {
 	struct LogTarget   *next;
@@ -57,9 +58,9 @@ typedef struct LogTarget {
 
 void _PG_init(void);
 static void emit_log(ErrorData *edata);
-static const char *format_json(struct LogTarget *t, ErrorData *edata);
-static const char *format_syslog(struct LogTarget *t, ErrorData *edata);
-static const char *format_netstr(struct LogTarget *t, ErrorData *edata);
+static void format_json(struct LogTarget *t, ErrorData *edata, char *msgbuf);
+static void format_syslog(struct LogTarget *t, ErrorData *edata, char *msgbuf);
+static void format_netstr(struct LogTarget *t, ErrorData *edata, char *msgbuf);
 static void defineStringVariable(const char *name, const char *short_desc, char **value_addr);
 static void defineIntVariable(const char *name, const char *short_desc, int *value_addr);
 static void escape_json(char **dst, size_t *max, const char *str);
@@ -75,7 +76,6 @@ static char				   *log_username = NULL;
 static char				   *log_database = NULL;
 static char				   *log_hostname = NULL;
 static char					my_hostname[64];
-static char					msgbuf[MAX_MESSAGE_SIZE];
 
 
 /* Convenience wrapper for DefineCustomStringVariable */
@@ -390,15 +390,15 @@ escape_json(char **dst, size_t *max, const char *str)
 /*
  * Format the edata as JSON
  */
-static const char *
-format_json(struct LogTarget *target, ErrorData *edata)
+static void
+format_json(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 {
 	char	   *buf;
 	size_t		len;
 
 	buf = msgbuf;
-	len = sizeof(msgbuf);
 	*buf = '\0';
+	len = MAX_MESSAGE_SIZE;
 
 	append_string(&buf, &len, "{ ");
 	append_json_string(&buf, &len, "username", log_username, true);
@@ -413,16 +413,14 @@ format_json(struct LogTarget *target, ErrorData *edata)
 	append_json_string(&buf, &len, "hint", edata->hint, true);
 	append_json_string(&buf, &len, "context", edata->context, false);
 	append_string(&buf, &len, " }");
-
-	return msgbuf;
 }
 
 /*
  * Format the payload as standard syslog message.
  * See: http://tools.ietf.org/html/rfc5424
  */
-static const char *
-format_syslog(struct LogTarget *target, ErrorData *edata)
+static void
+format_syslog(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 {
 	int			pri, len, i;
 	int			severity = -1;
@@ -452,16 +450,14 @@ format_syslog(struct LogTarget *target, ErrorData *edata)
 	 */
 
 	/* header */
-	len = snprintf(msgbuf, sizeof(msgbuf), "<%d>1 %s %s postgres %d %s ",
+	len = snprintf(msgbuf, MAX_MESSAGE_SIZE, "<%d>1 %s %s postgres %d %s ",
 		pri, ts, my_hostname, MyProcPid, "-");
 	
 	/* structured data - skip for now */
-	len += snprintf(msgbuf+len, sizeof(msgbuf) - len, "%s ", "-");
+	len += snprintf(msgbuf+len, MAX_MESSAGE_SIZE - len, "%s ", "-");
 
 	/* message payload */
-	len += snprintf(msgbuf+len, sizeof(msgbuf) - len, "%s", edata->message);
-
-	return msgbuf;
+	len += snprintf(msgbuf+len, MAX_MESSAGE_SIZE - len, "%s", edata->message);
 }
 
 /*
@@ -469,29 +465,27 @@ format_syslog(struct LogTarget *target, ErrorData *edata)
  * one field after another: elevel, sqlerrcode, user, database, host,
  * funcname, message, detail, hint, context, debug_query_string
  */
-static const char *
-format_netstr(struct LogTarget *target, ErrorData *edata)
+static void
+format_netstr(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 {
 	char		intbuf[16];
 	char	   *intptr = intbuf;	/* hack to suppress compiler warning */
 	int			len = 0;
 
 	snprintf(intbuf, sizeof(intbuf), "%d", edata->elevel);
-	len += NETSTR(msgbuf+len, sizeof(msgbuf)-len, intptr);
+	len += NETSTR(msgbuf+len, MAX_MESSAGE_SIZE-len, intptr);
 	snprintf(intbuf, sizeof(intbuf), "%d", edata->sqlerrcode);
-	len += NETSTR(msgbuf+len, sizeof(msgbuf)-len, intptr);
+	len += NETSTR(msgbuf+len, MAX_MESSAGE_SIZE-len, intptr);
 
-	len += NETSTR(msgbuf+len, sizeof(msgbuf)-len, log_username);
-	len += NETSTR(msgbuf+len, sizeof(msgbuf)-len, log_database);
-	len += NETSTR(msgbuf+len, sizeof(msgbuf)-len, log_hostname);
-	len += NETSTR(msgbuf+len, sizeof(msgbuf)-len, edata->funcname);
-	len += NETSTR(msgbuf+len, sizeof(msgbuf)-len, edata->message);
-	len += NETSTR(msgbuf+len, sizeof(msgbuf)-len, edata->detail);
-	len += NETSTR(msgbuf+len, sizeof(msgbuf)-len, edata->hint);
-	len += NETSTR(msgbuf+len, sizeof(msgbuf)-len, edata->context);
-	len += NETSTR(msgbuf+len, sizeof(msgbuf)-len, debug_query_string);
-
-	return msgbuf;
+	len += NETSTR(msgbuf+len, MAX_MESSAGE_SIZE-len, log_username);
+	len += NETSTR(msgbuf+len, MAX_MESSAGE_SIZE-len, log_database);
+	len += NETSTR(msgbuf+len, MAX_MESSAGE_SIZE-len, log_hostname);
+	len += NETSTR(msgbuf+len, MAX_MESSAGE_SIZE-len, edata->funcname);
+	len += NETSTR(msgbuf+len, MAX_MESSAGE_SIZE-len, edata->message);
+	len += NETSTR(msgbuf+len, MAX_MESSAGE_SIZE-len, edata->detail);
+	len += NETSTR(msgbuf+len, MAX_MESSAGE_SIZE-len, edata->hint);
+	len += NETSTR(msgbuf+len, MAX_MESSAGE_SIZE-len, edata->context);
+	len += NETSTR(msgbuf+len, MAX_MESSAGE_SIZE-len, debug_query_string);
 }
 
 /*
@@ -500,8 +494,8 @@ format_netstr(struct LogTarget *target, ErrorData *edata)
 static void
 emit_log(ErrorData *edata)
 {
-	const char	*buf = NULL;
-	LogTarget   *t;
+	char		msgbuf[MAX_MESSAGE_SIZE];
+	LogTarget  *t;
 
 	/* Call any previous hooks */
 	if (prev_emit_log_hook)
@@ -528,9 +522,10 @@ emit_log(ErrorData *edata)
 		if (t->message_filter && !strstr(edata->message, t->message_filter))
 			continue;
 
-		buf = t->format_payload(t, edata);
+		t->format_payload(t, edata, msgbuf);
 
-		if (sendto(t->log_socket, buf, strlen(buf), 0, &t->si_remote, sizeof(t->si_remote)) < 0)
+		if (sendto(t->log_socket, msgbuf, strlen(msgbuf), 0,
+			      &t->si_remote, sizeof(t->si_remote)) < 0)
 			fprintf(stderr, "pg_logforward: sendto: %s\n", strerror(errno));
 
 	}
