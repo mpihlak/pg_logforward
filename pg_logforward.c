@@ -79,9 +79,10 @@ static char					msgbuf[MAX_MESSAGE_SIZE];
 
 
 /* Convenience wrapper for DefineCustomStringVariable */
-static void defineStringVariable(	const char *name,
-									const char *short_desc,
-									char **value_addr)
+static void
+defineStringVariable(	const char *name,
+						const char *short_desc,
+						char **value_addr)
 {
 	DefineCustomStringVariable(name,
 			short_desc,
@@ -104,9 +105,10 @@ static void defineStringVariable(	const char *name,
 }
 
 /* Convinience wrapper for DefineCustomIntVariable */
-static void defineIntVariable(	const char *name,
-								const char *short_desc,
-								int *value_addr)
+static void
+defineIntVariable(	const char *name,
+					const char *short_desc,
+					int *value_addr)
 {
 	DefineCustomIntVariable(name,
 			short_desc,
@@ -388,7 +390,8 @@ escape_json(char **dst, size_t *max, const char *str)
 /*
  * Format the edata as JSON
  */
-static const char *format_json(struct LogTarget *target, ErrorData *edata)
+static const char *
+format_json(struct LogTarget *target, ErrorData *edata)
 {
 	char	   *buf;
 	size_t		len;
@@ -418,7 +421,8 @@ static const char *format_json(struct LogTarget *target, ErrorData *edata)
  * Format the payload as standard syslog message.
  * See: http://tools.ietf.org/html/rfc5424
  */
-static const char *format_syslog(struct LogTarget *target, ErrorData *edata)
+static const char *
+format_syslog(struct LogTarget *target, ErrorData *edata)
 {
 	int			pri, len, i;
 	int			severity = -1;
@@ -465,7 +469,8 @@ static const char *format_syslog(struct LogTarget *target, ErrorData *edata)
  * one field after another: elevel, sqlerrcode, user, database, host,
  * funcname, message, detail, hint, context, debug_query_string
  */
-static const char *format_netstr(struct LogTarget *target, ErrorData *edata)
+static const char *
+format_netstr(struct LogTarget *target, ErrorData *edata)
 {
 	char		intbuf[16];
 	char	   *intptr = intbuf;	/* hack to suppress compiler warning */
