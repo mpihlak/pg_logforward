@@ -21,15 +21,8 @@ PG_MODULE_MAGIC;
 
 #define DEFAULT_PAYLOAD_FORMAT	"json"
 #define DEFAULT_FORMAT_FUNC		format_json
-
 #define DEFAULT_SYSLOG_FACILITY	"local0"
-
 #define MAX_MESSAGE_SIZE		8192
-
-#define NETSTR(buf, size, value) \
-					snprintf(buf, size, "%u:%s,", \
-						(unsigned)((value) ? strlen(value) : 0), \
-						(value) ? (value) : "")
 
 
 struct LogTarget;	/* Forward declaration */
@@ -65,6 +58,7 @@ static void defineStringVariable(const char *name, const char *short_desc, char 
 static void defineIntVariable(const char *name, const char *short_desc, int *value_addr);
 static void escape_json(char **dst, size_t *max, const char *str);
 static void append_string(char **dst, size_t *max, const char *src);
+static void append_netstr(char **buf, size_t *max, const char *str);
 static void append_json_str(char **buf, size_t *max, const char *key, const char *val, bool addComma);
 static void append_json_int(char **buf, size_t *max, const char *key, int val, bool addComma);
 
@@ -315,6 +309,21 @@ append_string(char **dst, size_t *max, const char *src)
 }
 
 /*
+ * Append a netstring to buf.
+ * See: http://cr.yp.to/proto/netstrings.txt
+ */
+static void
+append_netstr(char **buf, size_t *max, const char *str)
+{
+	char prefix[16];
+
+	snprintf(prefix, sizeof(prefix), "%u:", str ? (unsigned)strlen(str) : 0);
+	append_string(buf, max, prefix);
+	append_string(buf, max, str ? str : "");
+	append_string(buf, max, ",");
+}
+
+/*
  * Add a json key/strvalue pair to the buffer.
  */
 static void
@@ -469,23 +478,27 @@ static void
 format_netstr(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 {
 	char		intbuf[16];
-	char	   *intptr = intbuf;	/* hack to suppress compiler warning */
-	int			len = 0;
+	char	   *buf = msgbuf;
+	size_t		len = MAX_MESSAGE_SIZE;
+
+	*buf = '\0';
+
+	fprintf(stderr, "format_netstr\n");
 
 	snprintf(intbuf, sizeof(intbuf), "%d", edata->elevel);
-	len += NETSTR(msgbuf+len, MAX_MESSAGE_SIZE-len, intptr);
+	append_netstr(&buf, &len, intbuf);
 	snprintf(intbuf, sizeof(intbuf), "%d", edata->sqlerrcode);
-	len += NETSTR(msgbuf+len, MAX_MESSAGE_SIZE-len, intptr);
+	append_netstr(&buf, &len, intbuf);
 
-	len += NETSTR(msgbuf+len, MAX_MESSAGE_SIZE-len, log_username);
-	len += NETSTR(msgbuf+len, MAX_MESSAGE_SIZE-len, log_database);
-	len += NETSTR(msgbuf+len, MAX_MESSAGE_SIZE-len, log_hostname);
-	len += NETSTR(msgbuf+len, MAX_MESSAGE_SIZE-len, edata->funcname);
-	len += NETSTR(msgbuf+len, MAX_MESSAGE_SIZE-len, edata->message);
-	len += NETSTR(msgbuf+len, MAX_MESSAGE_SIZE-len, edata->detail);
-	len += NETSTR(msgbuf+len, MAX_MESSAGE_SIZE-len, edata->hint);
-	len += NETSTR(msgbuf+len, MAX_MESSAGE_SIZE-len, edata->context);
-	len += NETSTR(msgbuf+len, MAX_MESSAGE_SIZE-len, debug_query_string);
+	append_netstr(&buf, &len, log_username);
+	append_netstr(&buf, &len, log_database);
+	append_netstr(&buf, &len, log_hostname);
+	append_netstr(&buf, &len, edata->funcname);
+	append_netstr(&buf, &len, edata->message);
+	append_netstr(&buf, &len, edata->detail);
+	append_netstr(&buf, &len, edata->hint);
+	append_netstr(&buf, &len, edata->context);
+	append_netstr(&buf, &len, debug_query_string);
 }
 
 /*
