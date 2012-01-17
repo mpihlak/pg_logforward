@@ -57,7 +57,7 @@ if __name__ == "__main__":
         PORT = 23456
     else:
         PORT = int(sys.argv[1])
-    HOST = "localhost"
+    HOST = ""
 
     print("Listening on %s:%s" % (HOST, PORT))
     server = SocketServer.UDPServer((HOST, PORT), JSONLogServer)
