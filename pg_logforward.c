@@ -483,8 +483,6 @@ format_netstr(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 
 	*buf = '\0';
 
-	fprintf(stderr, "format_netstr\n");
-
 	snprintf(intbuf, sizeof(intbuf), "%d", edata->elevel);
 	append_netstr(&buf, &len, intbuf);
 	snprintf(intbuf, sizeof(intbuf), "%d", edata->sqlerrcode);
