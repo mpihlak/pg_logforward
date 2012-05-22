@@ -43,6 +43,7 @@ typedef struct LogTarget {
 	/* Log filtering */
 	int					min_elevel;
 	char			   *message_filter;
+	List			   *filter_list;
 
 	/* Formatting function */
 	format_payload_t	format_payload;
@@ -149,6 +150,13 @@ _PG_init(void)
 	defineStringVariable("logforward.target_names",
 						 "List of log forwarding destination names",
 						 &log_target_names);
+	/* No targets specified, go away */
+	if (!log_target_names)
+	{
+		MemoryContextSwitchTo(mctx);
+		return;
+	}
+
 	target_names = pstrdup(log_target_names);
 
 	/*
@@ -158,6 +166,7 @@ _PG_init(void)
 	{
 		LogTarget  *target = palloc(sizeof(LogTarget));
 		char		buf[64];
+		char	   *t;
 
 		target->name = tgname;
 		target->next = NULL;
@@ -165,6 +174,7 @@ _PG_init(void)
 		target->remote_port = 0;
 		target->min_elevel = 0;
 		target->message_filter = NULL;
+		target->filter_list = NIL;
 		target->log_format = DEFAULT_PAYLOAD_FORMAT;
 		target->syslog_facility = DEFAULT_SYSLOG_FACILITY;
 		target->facility_id = -1;
@@ -278,6 +288,13 @@ _PG_init(void)
 		else
 			log_targets = target;
 		tail = target;
+
+		/* Break down the filter list */
+		for (t = strtok(target->message_filter, "|"); t != NULL; t = strtok(NULL, "|"))
+		{
+			target->filter_list = lappend(target->filter_list, t);
+			fprintf(stderr, "pg_logforward: added filter: %s\n", t);
+		}
 	}
 
 	pfree(target_names);
@@ -535,8 +552,25 @@ emit_log(ErrorData *edata)
 			continue;
 
 		/* Skip uninteresting messages */
-		if (t->message_filter && !strstr(edata->message, t->message_filter))
-			continue;
+		if (t->message_filter)
+		{
+			ListCell   *cell;
+			bool		found = false;
+
+			foreach (cell, t->filter_list)
+			{
+				char *filter = (char *)lfirst(cell);
+
+			 	if (strstr(edata->message, filter))
+				{
+					found = true;
+					break;
+				}
+			}
+
+			if (!found)
+				continue;
+		}
 
 		t->format_payload(t, edata, msgbuf);
 
