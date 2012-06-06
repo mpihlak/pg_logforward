@@ -135,6 +135,7 @@ _PG_init(void)
 {
 	LogTarget	   *tail = log_targets;
 	char		   *target_names, *tgname;
+	char		   *tokptr;
 	MemoryContext	mctx;
 
 	/* Install Hooks */
@@ -162,7 +163,7 @@ _PG_init(void)
 	/*
 	 * Set up the log targets.
 	 */
-	for (tgname = strtok(target_names, ","); tgname != NULL; tgname = strtok(NULL, ","))
+	for (tgname = strtok_r(target_names, ",", &tokptr); tgname != NULL; tgname = strtok_r(NULL, ",", &tokptr))
 	{
 		LogTarget  *target = palloc(sizeof(LogTarget));
 		char		buf[64];
