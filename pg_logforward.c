@@ -135,7 +135,7 @@ _PG_init(void)
 {
 	LogTarget	   *tail = log_targets;
 	char		   *target_names, *tgname;
-	char		   *tokptr;
+	char		   *tokptr = NULL;
 	MemoryContext	mctx;
 
 	/* Install Hooks */
