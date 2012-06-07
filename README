@@ -9,6 +9,10 @@ Requires PostgreSQL logging hooks patch - included in the patches directory.
 The patch is against 9.2devel but also applies against 9.1 and 8.3. Although
 some offsets are expected.
 
+Building
+========
+USE_PGXS=1 make install
+
 Output formats
 ==============
 The current version supports JSON, netstring and Syslog output formats.
@@ -35,7 +39,7 @@ logforward.jsonsrv_format = 'json'
 
 logforward.netstr_host = '127.0.0.1'
 logforward.netstr_port = 23458
-logforward.netstr_message_filter = 'connect'
+logforward.netstr_message_filter = 'foo|bar|baz'	# match any of the foo, bar or baz
 logforward.netstr_format = 'netstr'
 
 Note that you need to copy the shared library also to $libdir/plugins if you
