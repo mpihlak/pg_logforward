@@ -39,7 +39,8 @@ logforward.jsonsrv_format = 'json'
 
 logforward.netstr_host = '127.0.0.1'
 logforward.netstr_port = 23458
-logforward.netstr_message_filter = 'foo|bar|baz'	# match any of the foo, bar or baz
+logforward.netstr_message_filter = 'foo|bar|baz'		# match any of the foo, bar or baz
+logforward.netstr_funcname_filter = 'exec_simple_query'	# filter on function calling ereport call (list)
 logforward.netstr_format = 'netstr'
 
 Note that you need to copy the shared library also to $libdir/plugins if you

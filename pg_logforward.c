@@ -27,6 +27,16 @@ PG_MODULE_MAGIC;
 
 struct LogTarget;	/* Forward declaration */
 
+typedef enum {
+	FILTER_MESSAGE,						/* Filter on message text */
+	FILTER_FUNCNAME,					/* Filter on funcname of ErrorReport */
+} LogFilterType;
+
+typedef struct LogFilter {
+	LogFilterType		filter_type;	/* Type of the filter */
+	char			   *filter_text;	/* Filter text */
+} LogFilter;
+
 typedef void (*format_payload_t)(struct LogTarget *t, ErrorData *e, char *msgbuf);
 
 typedef struct LogTarget {
@@ -42,8 +52,11 @@ typedef struct LogTarget {
 
 	/* Log filtering */
 	int					min_elevel;
-	char			   *message_filter;
-	List			   *filter_list;
+	List			   *filter_list;			/* Filtering conditions for this target */
+
+	/* GUC placeholders for filters */
+	char			   *_message_filter;
+	char			   *_funcname_filter;
 
 	/* Formatting function */
 	format_payload_t	format_payload;
@@ -57,6 +70,7 @@ static void format_syslog(struct LogTarget *t, ErrorData *edata, char *msgbuf);
 static void format_netstr(struct LogTarget *t, ErrorData *edata, char *msgbuf);
 static void defineStringVariable(const char *name, const char *short_desc, char **value_addr);
 static void defineIntVariable(const char *name, const char *short_desc, int *value_addr);
+static void add_filters(LogTarget *target, LogFilterType filter_type, char *filter_source);
 static void escape_json(char **dst, size_t *max, const char *str);
 static void append_string(char **dst, size_t *max, const char *src);
 static void append_netstr(char **buf, size_t *max, const char *str);
@@ -128,6 +142,43 @@ defineIntVariable(	const char *name,
 }
 
 /*
+ * Add filters from filter_source to target's filter list.
+ *
+ * Note: filter_source is mangled in the process.
+ */
+static void
+add_filters(LogTarget *target, LogFilterType filter_type, char *filter_source)
+{
+	LogFilter  *f;
+	char	   *t;
+	char	   *ftstr = NULL;
+	char       *tokptr = NULL;
+
+	if (!filter_source)
+		return;
+
+	/* Sanity check filter types before adding to list */
+	switch (filter_type)
+	{
+		case FILTER_FUNCNAME:	ftstr = "funcname"; break;
+		case FILTER_MESSAGE:	ftstr = "message"; break;
+		default:
+			fprintf(stderr, "pg_logforward: unknown message filter type: %d\n", filter_type);
+			return;
+	}
+
+	/* Split the filter_source into list items */
+	for (t = strtok_r(filter_source, "|", &tokptr); t != NULL; t = strtok_r(NULL, "|", &tokptr))
+	{
+		f = palloc(sizeof(*f));
+		f->filter_type = filter_type;
+		f->filter_text = t;
+		target->filter_list = lappend(target->filter_list, f);
+		fprintf(stderr, "pg_logforward: added %s filter: %s\n", ftstr, t);
+	}
+}
+
+/*
  * Module Load Callback
  */
 void
@@ -167,14 +218,14 @@ _PG_init(void)
 	{
 		LogTarget  *target = palloc(sizeof(LogTarget));
 		char		buf[64];
-		char	   *t;
 
 		target->name = tgname;
 		target->next = NULL;
 		target->remote_ip = "";
 		target->remote_port = 0;
 		target->min_elevel = 0;
-		target->message_filter = NULL;
+		target->_message_filter = NULL;
+		target->_funcname_filter = NULL;
 		target->filter_list = NIL;
 		target->log_format = DEFAULT_PAYLOAD_FORMAT;
 		target->syslog_facility = DEFAULT_SYSLOG_FACILITY;
@@ -193,9 +244,13 @@ _PG_init(void)
 		defineIntVariable(	buf, "Minimum elevel that will be forwarded",
 							 &target->min_elevel);
 
+		snprintf(buf, sizeof(buf), "logforward.%s_funcname_filter", tgname);
+		defineStringVariable(buf, "ereport __func__ names to be filtered for this target",
+							 &target->_funcname_filter);
+
 		snprintf(buf, sizeof(buf), "logforward.%s_message_filter", tgname);
 		defineStringVariable(buf, "Messages to be filtered for this target",
-							 &target->message_filter);
+							 &target->_message_filter);
 
 		snprintf(buf, sizeof(buf), "logforward.%s_format", tgname);
 		defineStringVariable(buf, "Log format for this target: json, netstr, syslog",
@@ -290,12 +345,8 @@ _PG_init(void)
 			log_targets = target;
 		tail = target;
 
-		/* Break down the filter list */
-		for (t = strtok(target->message_filter, "|"); t != NULL; t = strtok(NULL, "|"))
-		{
-			target->filter_list = lappend(target->filter_list, t);
-			fprintf(stderr, "pg_logforward: added filter: %s\n", t);
-		}
+		add_filters(target, FILTER_FUNCNAME, target->_funcname_filter);
+		add_filters(target, FILTER_MESSAGE, target->_message_filter);
 	}
 
 	pfree(target_names);
@@ -543,42 +594,37 @@ emit_log(ErrorData *edata)
 	}
 
 	/*
-	 * Loop through the log targets, send the message if all 
-	 * filter conditions are met.
+	 * Loop through the log targets, send the message if filter conditions are met.
 	 */
 	for (t = log_targets; t != NULL; t = t->next)
 	{
+		ListCell   *cell;
+		bool		filter_match = t->filter_list ? false : true;
+
 		/* Skip messages with too low severity */
 		if (edata->elevel < t->min_elevel)
 			continue;
 
-		/* Skip uninteresting messages */
-		if (t->message_filter)
+		/* Go through message filters, if any */
+        for (cell = list_head(t->filter_list); cell != NULL && !filter_match; cell = lnext(cell))
 		{
-			ListCell   *cell;
-			bool		found = false;
+			LogFilter   *f = (LogFilter *)lfirst(cell);
 
-			foreach (cell, t->filter_list)
-			{
-				char *filter = (char *)lfirst(cell);
-
-			 	if (strstr(edata->message, filter))
-				{
-					found = true;
-					break;
-				}
-			}
-
-			if (!found)
-				continue;
+			if (f->filter_type == FILTER_FUNCNAME)
+				filter_match = strstr(edata->funcname, f->filter_text) != NULL;
+			else if (f->filter_type == FILTER_MESSAGE)
+				filter_match = strstr(edata->message, f->filter_text) != NULL;
 		}
 
-		t->format_payload(t, edata, msgbuf);
+		/* Format the message if any of the filters match */
+		if (filter_match)
+		{
+			t->format_payload(t, edata, msgbuf);
 
-		if (sendto(t->log_socket, msgbuf, strlen(msgbuf), 0,
-			      &t->si_remote, sizeof(t->si_remote)) < 0)
-			fprintf(stderr, "pg_logforward: sendto: %s\n", strerror(errno));
-
+			if (sendto(t->log_socket, msgbuf, strlen(msgbuf), 0,
+						&t->si_remote, sizeof(t->si_remote)) < 0)
+				fprintf(stderr, "pg_logforward: sendto: %s\n", strerror(errno));
+		}
 	}
 }
 
