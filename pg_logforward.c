@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 
 #include <unistd.h>
 #include <fcntl.h>
@@ -16,6 +17,7 @@
 #include "libpq/libpq.h"
 #include "utils/memutils.h"
 #include "miscadmin.h"
+#include "postmaster/syslogger.h"
 
 PG_MODULE_MAGIC;
 
@@ -64,6 +66,7 @@ typedef struct LogTarget {
 
 
 void _PG_init(void);
+static void tell(const char *fmt, ...);
 static void emit_log(ErrorData *edata);
 static void format_json(struct LogTarget *t, ErrorData *edata, char *msgbuf);
 static void format_syslog(struct LogTarget *t, ErrorData *edata, char *msgbuf);
@@ -142,6 +145,41 @@ defineIntVariable(	const char *name,
 }
 
 /*
+ * Tell a message about pg_logforward.
+ *
+ * XXX: For the lack of a better place, append the messages to a file. 
+ * If possible use postgres log directory. If not, cwd will have to do.
+ */
+static void
+tell(const char *fmt, ...)
+{
+	FILE   *fp;
+	char	logname[1024];
+
+	snprintf(logname, sizeof(logname), "%s/pg_logforward.out",
+		Log_directory ? Log_directory : ".");
+
+	if ((fp = fopen(logname, "a")) != NULL)
+	{
+		char	timebuf[64];
+		va_list	ap;
+		time_t	t;
+
+		time(&t);
+		strftime(timebuf, sizeof(timebuf), "%c", localtime(&t));
+
+		va_start(ap, fmt);
+
+		fprintf(fp, "%s pg_logforward: ", timebuf);
+
+		vfprintf(fp, fmt, ap);
+
+		va_end(ap);
+		fclose(fp);
+	}
+}
+
+/*
  * Add filters from filter_source to target's filter list.
  *
  * Note: filter_source is mangled in the process.
@@ -163,7 +201,7 @@ add_filters(LogTarget *target, LogFilterType filter_type, char *filter_source)
 		case FILTER_FUNCNAME:	ftstr = "funcname"; break;
 		case FILTER_MESSAGE:	ftstr = "message"; break;
 		default:
-			fprintf(stderr, "pg_logforward: unknown message filter type: %d\n", filter_type);
+			tell("unknown message filter type: %d\n", filter_type);
 			return;
 	}
 
@@ -174,7 +212,7 @@ add_filters(LogTarget *target, LogFilterType filter_type, char *filter_source)
 		f->filter_type = filter_type;
 		f->filter_text = t;
 		target->filter_list = lappend(target->filter_list, f);
-		fprintf(stderr, "pg_logforward: added %s filter: %s\n", ftstr, t);
+		tell("added %s filter: %s\n", ftstr, t);
 	}
 }
 
@@ -265,26 +303,26 @@ _PG_init(void)
 		 */
 		if (!target->remote_ip)
 		{
-			fprintf(stderr, "pg_logforward: %s: no target ip address defined.\n", tgname);
+			tell("%s: no target ip address defined.\n", tgname);
 			continue;
 		}
 
 		if (!target->remote_port)
 		{
-			fprintf(stderr, "pg_logforward: %s: no target port defined.\n", tgname);
+			tell("%s: no target port defined.\n", tgname);
 			continue;
 		}
 
 		if ((target->log_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0)
 		{
-			fprintf(stderr, "pg_logforward: %s: cannot create socket: %s\n",
+			tell("%s: cannot create socket: %s\n",
 					tgname, strerror(errno));
 			continue;
 		}
 
 		if (fcntl(target->log_socket, F_SETFL, O_NONBLOCK) == -1)
 		{
-			fprintf(stderr, "pg_logforward: %s: cannot set socket nonblocking: %s\n",
+			tell("%s: cannot set socket nonblocking: %s\n",
 					tgname, strerror(errno));
 			continue;
 		}
@@ -294,7 +332,7 @@ _PG_init(void)
 		target->si_remote.sin_port = htons(target->remote_port);
 
 		if (inet_aton(target->remote_ip, &target->si_remote.sin_addr) == 0)
-			fprintf(stderr, "pg_logforward: %s: invalid remote address: %s\n",
+			tell("%s: invalid remote address: %s\n",
 					tgname, target->remote_ip);
 
 		/*
@@ -323,19 +361,18 @@ _PG_init(void)
 			/* No valid facility found, skip the target */
 			if (target->facility_id < 0)
 			{
-				fprintf(stderr, "pg_logforward: invalid syslog facility: %s\n",
-					target->syslog_facility);
+				tell("invalid syslog facility: %s\n", target->syslog_facility);
 				break;
 			}
 		}
 		else
 		{
-			fprintf(stderr, "pg_logforward: unknown payload format (%s), using %s",
+			tell("unknown payload format (%s), using %s",
 				target->log_format, DEFAULT_PAYLOAD_FORMAT);
 			target->format_payload = DEFAULT_FORMAT_FUNC;
 		}
 
-		fprintf(stderr, "pg_logforward: forwarding to target %s: %s:%d, format: %s\n",
+		tell("forwarding to target %s: %s:%d, format: %s\n",
 				tgname, target->remote_ip, target->remote_port, target->log_format);
 
 		/* Append the new target to the list of targets */
@@ -623,7 +660,7 @@ emit_log(ErrorData *edata)
 
 			if (sendto(t->log_socket, msgbuf, strlen(msgbuf), 0,
 						&t->si_remote, sizeof(t->si_remote)) < 0)
-				fprintf(stderr, "pg_logforward: sendto: %s\n", strerror(errno));
+				tell("sendto: %s\n", strerror(errno));
 		}
 	}
 }
