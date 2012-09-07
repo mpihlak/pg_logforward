@@ -66,7 +66,7 @@ typedef struct LogTarget {
 
 
 void _PG_init(void);
-static void tell(const char *fmt, ...);
+static void tell(const char *fmt, ...) __attribute__((format(PG_PRINTF_ATTRIBUTE, 1, 2)));
 static void emit_log(ErrorData *edata);
 static void format_json(struct LogTarget *t, ErrorData *edata, char *msgbuf);
 static void format_syslog(struct LogTarget *t, ErrorData *edata, char *msgbuf);
@@ -659,7 +659,7 @@ emit_log(ErrorData *edata)
 			t->format_payload(t, edata, msgbuf);
 
 			if (sendto(t->log_socket, msgbuf, strlen(msgbuf), 0,
-						&t->si_remote, sizeof(t->si_remote)) < 0)
+					   (struct sockaddr *) &t->si_remote, sizeof(t->si_remote)) < 0)
 				tell("sendto: %s\n", strerror(errno));
 		}
 	}
