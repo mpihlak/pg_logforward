@@ -456,7 +456,7 @@ append_json_int(char **buf, size_t *max, const char *key, int val, bool addComma
 	escape_json(buf, max, key);
 	append_string(buf, max, ": ");
 
-	snprintf(intbuf, sizeof(buf), "%d", val);
+	snprintf(intbuf, sizeof(intbuf), "%d", val);
 	append_string(buf, max, intbuf);
 
 	if (addComma)
