@@ -18,6 +18,7 @@
 #include "libpq/libpq.h"
 #include "utils/memutils.h"
 #include "miscadmin.h"
+#include "postmaster/postmaster.h"
 #include "postmaster/syslogger.h"
 
 PG_MODULE_MAGIC;
@@ -85,9 +86,10 @@ static void append_json_int(char **buf, size_t *max, const char *key, int val, b
 static emit_log_hook_type	prev_emit_log_hook = NULL;
 static LogTarget		   *log_targets = NULL;
 static char				   *log_target_names = "";
+static char				   *instance_label = "";
 static char				   *log_username = NULL;
 static char				   *log_database = NULL;
-static char				   *log_hostname = NULL;
+static char				   *log_remotehost = NULL;
 static char					my_hostname[64];
 
 
@@ -249,6 +251,17 @@ _PG_init(void)
 	}
 
 	target_names = pstrdup(log_target_names);
+
+	defineStringVariable("logforward.instance_label",
+						 "A label to tell this PostgreSQL instance apart",
+						 &instance_label);
+	if (!instance_label || !instance_label[0])
+	{
+		char buf[64];
+
+		snprintf(buf, sizeof(buf), "%s:%d", my_hostname, PostPortNumber);
+		instance_label = strdup(buf);
+	}
 
 	/*
 	 * Set up the log targets.
@@ -519,7 +532,7 @@ format_json(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 	append_string(&buf, &len, "{ ");
 	append_json_str(&buf, &len, "username", log_username, true);
 	append_json_str(&buf, &len, "database", log_database, true);
-	append_json_str(&buf, &len, "remotehost", log_hostname, true);
+	append_json_str(&buf, &len, "remotehost", log_remotehost, true);
 	append_json_str(&buf, &len, "debug_query_string", debug_query_string, true);
 	append_json_int(&buf, &len, "elevel", edata->elevel, true);
 	append_json_str(&buf, &len, "funcname", edata->funcname, true);
@@ -527,7 +540,8 @@ format_json(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 	append_json_str(&buf, &len, "message", edata->message, true);
 	append_json_str(&buf, &len, "detail", edata->detail, true);
 	append_json_str(&buf, &len, "hint", edata->hint, true);
-	append_json_str(&buf, &len, "context", edata->context, false);
+	append_json_str(&buf, &len, "context", edata->context, true);
+	append_json_str(&buf, &len, "instance_label", instance_label, false);
 	append_string(&buf, &len, " }");
 }
 
@@ -597,13 +611,14 @@ format_netstr(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 
 	append_netstr(&buf, &len, log_username);
 	append_netstr(&buf, &len, log_database);
-	append_netstr(&buf, &len, log_hostname);
+	append_netstr(&buf, &len, log_remotehost);
 	append_netstr(&buf, &len, edata->funcname);
 	append_netstr(&buf, &len, edata->message);
 	append_netstr(&buf, &len, edata->detail);
 	append_netstr(&buf, &len, edata->hint);
 	append_netstr(&buf, &len, edata->context);
 	append_netstr(&buf, &len, debug_query_string);
+	append_netstr(&buf, &len, instance_label);
 }
 
 /*
@@ -627,7 +642,7 @@ emit_log(ErrorData *edata)
 	if (MyProcPort)
 	{
 		log_database = MyProcPort->database_name;
-		log_hostname = MyProcPort->remote_host;
+		log_remotehost = MyProcPort->remote_host;
 		log_username = MyProcPort->user_name;
 	}
 
