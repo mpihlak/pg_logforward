@@ -27,6 +27,7 @@ PG_MODULE_MAGIC;
 #define DEFAULT_FORMAT_FUNC		format_json
 #define DEFAULT_SYSLOG_FACILITY	"local0"
 #define MAX_MESSAGE_SIZE		8192
+#define FORMATTED_TS_LEN		128
 
 
 struct LogTarget;	/* Forward declaration */
@@ -91,6 +92,8 @@ static char				   *log_username = NULL;
 static char				   *log_database = NULL;
 static char				   *log_remotehost = NULL;
 static char					my_hostname[64];
+static struct timeval		log_tv;
+static char					log_timestamp[FORMATTED_TS_LEN];
 
 
 /* Convenience wrapper for DefineCustomStringVariable */
@@ -406,6 +409,34 @@ _PG_init(void)
 }
 
 /*
+ * Format timestamp to string using same format as server is using with %m
+ * escape. Based on function setup_formatted_log_time from elog.c
+ */
+static void format_log_timestamp(void)
+{
+	pg_time_t	stamp_time;
+#if PG_VERSION_NUM <= 90100
+	pg_tz		*tz;
+#endif
+	char		msbuf[8];
+	struct pg_tm	*pglt;
+
+	stamp_time = (pg_time_t) log_tv.tv_sec;
+#if PG_VERSION_NUM <= 90100
+	tz = log_timezone ? log_timezone : gmt_timezone;
+	pglt = pg_localtime(&stamp_time, tz);
+#else
+	pglt = pg_localtime(&stamp_time, log_timezone);
+#endif
+	/* leave room for milliseconds... */
+	pg_strftime(log_timestamp, FORMATTED_TS_LEN, "%Y-%m-%d %H:%M:%S     %Z", pglt);
+
+	/* 'paste' milliseconds into place... */
+	sprintf(msbuf, ".%03d", (int) (log_tv.tv_usec / 1000));
+	strncpy(log_timestamp + 19, msbuf, 4);
+}
+
+/*
  * Append one string to another, return the number of characters added.
  *
  * The value pointed to by max is decreased and 'dst' advanced by the number of
@@ -529,6 +560,9 @@ format_json(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 	*buf = '\0';
 	len = MAX_MESSAGE_SIZE;
 
+	if (log_timestamp[0] == '\0')
+		format_log_timestamp();
+
 	append_string(&buf, &len, "{ ");
 	append_json_str(&buf, &len, "username", log_username, true);
 	append_json_str(&buf, &len, "database", log_database, true);
@@ -541,7 +575,8 @@ format_json(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 	append_json_str(&buf, &len, "detail", edata->detail, true);
 	append_json_str(&buf, &len, "hint", edata->hint, true);
 	append_json_str(&buf, &len, "context", edata->context, true);
-	append_json_str(&buf, &len, "instance_label", instance_label, false);
+	append_json_str(&buf, &len, "instance_label", instance_label, true);
+	append_json_str(&buf, &len, "timestamp", log_timestamp, false);
 	append_string(&buf, &len, " }");
 }
 
@@ -570,7 +605,7 @@ format_syslog(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 
 	pri = target->facility_id * 8 + severity;
 
-	time(&now);
+	now = (time_t) log_tv.tv_sec;
 	gmt = gmtime(&now);
 	strftime(ts, sizeof(ts), "%F-%dT%H:%M:%SZ", gmt);
 
@@ -593,7 +628,7 @@ format_syslog(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 /*
  * Format the payload as set of netstrings. No fancy stuff, just
  * one field after another: elevel, sqlerrcode, user, database, host,
- * funcname, message, detail, hint, context, debug_query_string
+ * funcname, message, detail, hint, context, debug_query_string, timestamp
  */
 static void
 format_netstr(struct LogTarget *target, ErrorData *edata, char *msgbuf)
@@ -603,6 +638,8 @@ format_netstr(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 	size_t		len = MAX_MESSAGE_SIZE;
 
 	*buf = '\0';
+	if (log_timestamp[0] == '\0')
+		format_log_timestamp();
 
 	snprintf(intbuf, sizeof(intbuf), "%d", edata->elevel);
 	append_netstr(&buf, &len, intbuf);
@@ -619,6 +656,7 @@ format_netstr(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 	append_netstr(&buf, &len, edata->context);
 	append_netstr(&buf, &len, debug_query_string);
 	append_netstr(&buf, &len, instance_label);
+	append_netstr(&buf, &len, log_timestamp);
 }
 
 /*
@@ -645,6 +683,9 @@ emit_log(ErrorData *edata)
 		log_remotehost = MyProcPort->remote_host;
 		log_username = MyProcPort->user_name;
 	}
+
+	gettimeofday(&log_tv, NULL);
+	log_timestamp[0] = '\0';
 
 	/*
 	 * Loop through the log targets, send the message if filter conditions are met.
