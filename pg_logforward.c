@@ -28,7 +28,11 @@ PG_MODULE_MAGIC;
 #define DEFAULT_SYSLOG_FACILITY	"local0"
 #define MAX_MESSAGE_SIZE		8192
 #define FORMATTED_TS_LEN		128
+#define MAX_CUSTOM_FIELDS		32
 
+typedef enum {
+	FV_NONE = 0, FV_STR, FV_INT
+} FieldValueType;
 
 struct LogTarget;	/* Forward declaration */
 
@@ -67,7 +71,6 @@ typedef struct LogTarget {
 	format_payload_t	format_payload;
 } LogTarget;
 
-
 void _PG_init(void);
 static void tell(const char *fmt, ...) __attribute__((format(PG_PRINTF_ATTRIBUTE, 1, 2)));
 static void emit_log(ErrorData *edata);
@@ -80,6 +83,7 @@ static void add_filters(LogTarget *target, LogFilterType filter_type, char *filt
 static void escape_json(char **dst, size_t *max, const char *str);
 static void append_string(char **dst, size_t *max, const char *src);
 static void append_netstr(char **buf, size_t *max, const char *str);
+static FieldValueType extract_field_value(const char *field_name, ErrorData *edata, const char **strval, int *intval);
 static void append_json_str(char **buf, size_t *max, const char *key, const char *val, bool addComma);
 static void append_json_int(char **buf, size_t *max, const char *key, int val, bool addComma);
 
@@ -87,6 +91,7 @@ static void append_json_int(char **buf, size_t *max, const char *key, int val, b
 static emit_log_hook_type	prev_emit_log_hook = NULL;
 static LogTarget		   *log_targets = NULL;
 static char				   *log_target_names = "";
+static char				   *log_field_names = "";
 static char				   *instance_label = "";
 static char				   *log_username = NULL;
 static char				   *log_database = NULL;
@@ -94,6 +99,14 @@ static char				   *log_remotehost = NULL;
 static char					my_hostname[64];
 static struct timeval		log_tv;
 static char					log_timestamp[FORMATTED_TS_LEN];
+
+static char				   *field_names[] = {
+								"username", "database", "remotehost", "debug_query_string", "elevel",
+								"funcname", "sqlerrcode", "message", "detail", "hint",
+								"context", "instance_label", "timestamp",
+							};
+
+static int					n_field_names = sizeof(field_names) / sizeof(*field_names);
 
 
 /* Convenience wrapper for DefineCustomStringVariable */
@@ -231,6 +244,7 @@ _PG_init(void)
 	LogTarget	   *tail = log_targets;
 	char		   *target_names, *tgname;
 	char		   *tokptr = NULL;
+	int				i;
 	MemoryContext	mctx;
 
 	/* Install Hooks */
@@ -263,8 +277,32 @@ _PG_init(void)
 		char buf[64];
 
 		snprintf(buf, sizeof(buf), "%s:%d", my_hostname, PostPortNumber);
-		instance_label = strdup(buf);
+		instance_label = pstrdup(buf);
 	}
+
+	/*
+	 * Override logged fields if needed
+	 */
+	defineStringVariable("logforward.log_fields",
+						 "Field names for customizing forwarded log",
+						 &log_field_names);
+	if (log_field_names && log_field_names[0])
+	{
+		char    *ptr, *ftok = NULL;
+		char    *field_names_str = pstrdup(log_field_names);
+
+		/* Custom fields defined, override the default list */
+		n_field_names = 0;
+		for (ptr = strtok_r(field_names_str, ", ", &ftok); ptr != NULL; ptr = strtok_r(NULL, ", ", &ftok))
+			field_names[n_field_names++] = ptr;
+	}
+
+	/*
+	 * Tell what fields we are configured to log
+	 */
+	tell("Logging configured for the following %d fields:\n", n_field_names);
+	for (i = 0; i < n_field_names; i++)
+		tell("field %d: %s\n", i, field_names[i]);
 
 	/*
 	 * Set up the log targets.
@@ -475,7 +513,7 @@ append_netstr(char **buf, size_t *max, const char *str)
 }
 
 /*
- * Add a json key/strvalue pair to the buffer.
+ * Add a json key/value pair to the buffer.
  */
 static void
 append_json_str(char **buf, size_t *max, const char *key, const char *val, bool addComma)
@@ -548,13 +586,48 @@ escape_json(char **dst, size_t *max, const char *str)
 }
 
 /*
- * Format the edata as JSON
+ * Extract field value from edata structure by name.
+ */
+static FieldValueType extract_field_value(const char *field_name, ErrorData *edata, const char **strval, int *intval)
+{
+	FieldValueType rc = FV_STR;
+
+	if      (strcmp(field_name, "username") == 0) 			*strval = log_username;
+	else if (strcmp(field_name, "database") == 0) 			*strval = log_database;
+	else if (strcmp(field_name, "remotehost") == 0) 		*strval = log_remotehost;
+	else if (strcmp(field_name, "debug_query_string") == 0)	*strval = debug_query_string;
+	else if (strcmp(field_name, "instance_label") == 0) 	*strval = instance_label;
+	else if (strcmp(field_name, "timestamp") == 0) 			*strval = log_timestamp;
+	else if (strcmp(field_name, "funcname") == 0) 			*strval = edata->funcname;
+	else if (strcmp(field_name, "message") == 0) 			*strval = edata->message;
+	else if (strcmp(field_name, "detail") == 0) 			*strval = edata->detail;
+	else if (strcmp(field_name, "hint") == 0) 				*strval = edata->hint;
+	else if (strcmp(field_name, "context") == 0) 			*strval = edata->context;
+	else if (strcmp(field_name, "elevel") == 0)
+	{
+		*intval = edata->elevel;
+		rc = FV_INT;
+	}
+	else if (strcmp(field_name, "sqlerrcode") == 0)
+	{
+		*intval = edata->sqlerrcode;
+		rc = FV_INT;
+	}
+	else
+		rc = FV_NONE;
+
+	return rc;
+}
+
+/*
+ * JSON format
  */
 static void
 format_json(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 {
 	char	   *buf;
 	size_t		len;
+	int			i;
 
 	buf = msgbuf;
 	*buf = '\0';
@@ -564,25 +637,28 @@ format_json(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 		format_log_timestamp();
 
 	append_string(&buf, &len, "{ ");
-	append_json_str(&buf, &len, "username", log_username, true);
-	append_json_str(&buf, &len, "database", log_database, true);
-	append_json_str(&buf, &len, "remotehost", log_remotehost, true);
-	append_json_str(&buf, &len, "debug_query_string", debug_query_string, true);
-	append_json_int(&buf, &len, "elevel", edata->elevel, true);
-	append_json_str(&buf, &len, "funcname", edata->funcname, true);
-	append_json_int(&buf, &len, "sqlerrcode", edata->sqlerrcode, true);
-	append_json_str(&buf, &len, "message", edata->message, true);
-	append_json_str(&buf, &len, "detail", edata->detail, true);
-	append_json_str(&buf, &len, "hint", edata->hint, true);
-	append_json_str(&buf, &len, "context", edata->context, true);
-	append_json_str(&buf, &len, "instance_label", instance_label, true);
-	append_json_str(&buf, &len, "timestamp", log_timestamp, false);
+
+	for (i = 0; i < n_field_names; i++)
+	{
+		bool		last_field = (i == n_field_names - 1);
+		int			intval = -1;
+		int			v;
+		const char *strval = NULL;
+
+		if ((v = extract_field_value(field_names[i], edata, &strval, &intval)) == FV_STR) 
+			append_json_str(&buf, &len, field_names[i], strval, !last_field);
+		else if (v == FV_INT)
+			append_json_int(&buf, &len, field_names[i], intval, !last_field);
+	}
+
 	append_string(&buf, &len, " }");
 }
 
 /*
  * Format the payload as standard syslog message.
  * See: http://tools.ietf.org/html/rfc5424
+ *
+ * Stick to the fixed format here, ignore any field selections and customizations.
  */
 static void
 format_syslog(struct LogTarget *target, ErrorData *edata, char *msgbuf)
@@ -633,31 +709,31 @@ format_syslog(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 static void
 format_netstr(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 {
-	char		intbuf[16];
 	char	   *buf = msgbuf;
 	size_t		len = MAX_MESSAGE_SIZE;
+	int			i;
 
 	*buf = '\0';
 	if (log_timestamp[0] == '\0')
 		format_log_timestamp();
 
-	snprintf(intbuf, sizeof(intbuf), "%d", edata->elevel);
-	append_netstr(&buf, &len, intbuf);
-	snprintf(intbuf, sizeof(intbuf), "%d", edata->sqlerrcode);
-	append_netstr(&buf, &len, intbuf);
+	for (i = 0; i < n_field_names; i++)
+	{
+		int			v, intval = -1;
+		const char *strval = NULL;
 
-	append_netstr(&buf, &len, log_username);
-	append_netstr(&buf, &len, log_database);
-	append_netstr(&buf, &len, log_remotehost);
-	append_netstr(&buf, &len, edata->funcname);
-	append_netstr(&buf, &len, edata->message);
-	append_netstr(&buf, &len, edata->detail);
-	append_netstr(&buf, &len, edata->hint);
-	append_netstr(&buf, &len, edata->context);
-	append_netstr(&buf, &len, debug_query_string);
-	append_netstr(&buf, &len, instance_label);
-	append_netstr(&buf, &len, log_timestamp);
+		if ((v = extract_field_value(field_names[i], edata, &strval, &intval)) == FV_STR) 
+			append_netstr(&buf, &len, strval);
+		else if (v == FV_INT)
+		{
+			char	intbuf[64];
+
+			snprintf(intbuf, sizeof(intbuf), "%d", intval);
+			append_netstr(&buf, &len, intbuf);
+		}
+	}
 }
+
 
 /*
  * Handler for intercepting EmitErrorReport.

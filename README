@@ -26,6 +26,12 @@ shared_preload_libraries = 'pg_logforward'	# requires restart
 
 logforward.target_names = 'syslog,jsonsrv,netstr'
 
+# By default all fields are logged. Setting logforward.log_fields enables to omit certain fields
+# or change the order of fields (netstr). Applies to all targets except syslog
+#logforward.log_fields = "username, database, remotehost, debug_query_string, elevel, 
+#                         funcname, sqlerrcode, message, detail, hint, context,
+#						  instance_label, timestamp"
+
 logforward.syslog_host = '127.0.0.1'
 logforward.syslog_port = 23456
 logforward.syslog_min_elevel = 19               # WARNING and above
