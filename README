@@ -22,7 +22,7 @@ Usage
 Modify postgresql.conf to include:
 
 shared_preload_libraries = 'pg_logforward'	# requires restart
-custom_variable_classes = 'logforward'		# deprecated in 9.2
+#custom_variable_classes = 'logforward'		# only add this for 9.1 or older
 
 logforward.target_names = 'syslog,jsonsrv,netstr'
 
