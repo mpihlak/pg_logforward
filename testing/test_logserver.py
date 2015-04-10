@@ -23,9 +23,9 @@ class JSONLogServer(SocketServer.BaseRequestHandler):
             import netstring
             decoder = netstring.Decoder()
 
-            keys = [ "elevel", "sqlerrcode", "username", "database",
-                     "remotehost", "funcname", "message", "detail",
-                     "hint", "context ", "debug_query_string", ]
+            keys = [ "username", "database", "remotehost", "debug_query_string", "elevel",
+					 "funcname", "sqlerrcode", "message", "detail", "hint", "context ", 
+					 "instance_label", "timestamp" ]
             pos = 0
             for field in decoder.feed(data):
                 if pos < len(keys):
