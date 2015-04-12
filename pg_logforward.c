@@ -117,22 +117,15 @@ defineStringVariable(	const char *name,
 {
 	DefineCustomStringVariable(name,
 			short_desc,
-			NULL,
+			NULL,				/* long description */
 			value_addr,
-#if PG_VERSION_NUM >= 80400
-			NULL,				/* bootValue since 8.4 */
-#endif
-#if PG_VERSION_NUM >= 80400
-			PGC_SIGHUP,
+			NULL,				/* bootValue */
+			PGC_SIGHUP,			/* context */
 			0,					/* flags parameter since 8.4 */
-#else
-			PGC_USERSET,		/* 8.3 only allows USERSET custom params */
-#endif
-#if PG_VERSION_NUM >= 90100
 			NULL,				/* check_hook parameter since 9.1 */
-#endif
-			NULL,
-			NULL);
+			NULL,				/* assign hook */
+			NULL				/* show hook */
+			);
 }
 
 /* Convinience wrapper for DefineCustomIntVariable */
@@ -143,24 +136,17 @@ defineIntVariable(	const char *name,
 {
 	DefineCustomIntVariable(name,
 			short_desc,
-			NULL,
+			NULL,				/* long description */
 			value_addr,
-#if PG_VERSION_NUM >= 80400
-			0, 					/* bootValue since 8.4 */
-#endif
-			0,
-			65535,
-#if PG_VERSION_NUM >= 80400
-			PGC_SIGHUP,
-			0,
-#else
-			PGC_USERSET,		/* 8.3 only allows USERSET custom params */
-#endif
-#if PG_VERSION_NUM >= 90100
+			0, 					/* bootValue */
+			0,					/* minValue */
+			65535,				/* maxValue */
+			PGC_SIGHUP,			/* context */
+			0,					/* flags */
 			NULL,				/* check_hook parameter since 9.1 */
-#endif
-			NULL,
-			NULL);
+			NULL,				/* assign hook */
+			NULL				/* show hook */
+			);
 }
 
 /*
