@@ -39,6 +39,7 @@ struct LogTarget;	/* Forward declaration */
 typedef enum {
 	FILTER_MESSAGE,						/* Filter on message text */
 	FILTER_FUNCNAME,					/* Filter on funcname of ErrorReport */
+	FILTER_USERNAME,
 } LogFilterType;
 
 typedef struct LogFilter {
@@ -66,6 +67,7 @@ typedef struct LogTarget {
 	/* GUC placeholders for filters */
 	char			   *_message_filter;
 	char			   *_funcname_filter;
+	char			   *_username_filter;
 
 	/* Formatting function */
 	format_payload_t	format_payload;
@@ -205,6 +207,7 @@ add_filters(LogTarget *target, LogFilterType filter_type, char *filter_source)
 	{
 		case FILTER_FUNCNAME:	ftstr = "funcname"; break;
 		case FILTER_MESSAGE:	ftstr = "message"; break;
+		case FILTER_USERNAME:	ftstr = "username"; break;
 		default:
 			tell("unknown message filter type: %d\n", filter_type);
 			return;
@@ -305,6 +308,7 @@ _PG_init(void)
 		target->min_elevel = 0;
 		target->_message_filter = NULL;
 		target->_funcname_filter = NULL;
+		target->_username_filter = NULL;
 		target->filter_list = NIL;
 		target->log_format = DEFAULT_PAYLOAD_FORMAT;
 		target->syslog_facility = DEFAULT_SYSLOG_FACILITY;
@@ -330,6 +334,10 @@ _PG_init(void)
 		snprintf(buf, sizeof(buf), "logforward.%s_message_filter", tgname);
 		defineStringVariable(buf, "Messages to be filtered for this target",
 							 &target->_message_filter);
+
+		snprintf(buf, sizeof(buf), "logforward.%s_username_filter", tgname);
+		defineStringVariable(buf, "Usernames to be filtered for this target",
+							 &target->_username_filter);
 
 		snprintf(buf, sizeof(buf), "logforward.%s_format", tgname);
 		defineStringVariable(buf, "Log format for this target: json, netstr, syslog",
@@ -425,6 +433,7 @@ _PG_init(void)
 
 		add_filters(target, FILTER_FUNCNAME, target->_funcname_filter);
 		add_filters(target, FILTER_MESSAGE, target->_message_filter);
+		add_filters(target, FILTER_USERNAME, target->_username_filter);
 	}
 
 	pfree(target_names);
@@ -770,6 +779,12 @@ emit_log(ErrorData *edata)
 				filter_match = strstr(edata->funcname, f->filter_text) != NULL;
 			else if (f->filter_type == FILTER_MESSAGE)
 				filter_match = strstr(edata->message, f->filter_text) != NULL;
+			else if (f->filter_type == FILTER_USERNAME) {
+				if (log_username == NULL || *log_username == '\0')
+					filter_match = strcmp("[unknown]", f->filter_text) == 0;
+				else
+					filter_match = strcmp(log_username, f->filter_text) == 0;
+			}
 		}
 
 		/* Format the message if any of the filters match */
