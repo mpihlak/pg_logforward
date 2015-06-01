@@ -20,6 +20,7 @@
 #include "miscadmin.h"
 #include "postmaster/postmaster.h"
 #include "postmaster/syslogger.h"
+#include "mb/pg_wchar.h"
 
 PG_MODULE_MAGIC;
 
@@ -27,6 +28,13 @@ PG_MODULE_MAGIC;
 #define DEFAULT_FORMAT_FUNC		format_json
 #define DEFAULT_SYSLOG_FACILITY	"local0"
 #define MAX_MESSAGE_SIZE		8192
+/*
+ * RFC5424: IPv4 syslog receivers MUST be able to receive datagrams with message
+ * sizes up to and including 480 octets.
+ * Datagram header takes 8 octets.
+ * So we are leaving room for 470 octets + 1 for terminating null byte ('\0')
+ */
+#define MAX_SYSLOG_MSG_SIZE     471
 #define FORMATTED_TS_LEN		128
 #define MAX_CUSTOM_FIELDS		32
 
@@ -77,7 +85,7 @@ void _PG_init(void);
 static void tell(const char *fmt, ...) __attribute__((format(PG_PRINTF_ATTRIBUTE, 1, 2)));
 static void emit_log(ErrorData *edata);
 static void format_json(struct LogTarget *t, ErrorData *edata, char *msgbuf);
-static void format_syslog(struct LogTarget *t, ErrorData *edata, char *msgbuf);
+static int format_syslog_prefix(struct LogTarget *t, ErrorData *edata, char *msgbuf);
 static void format_netstr(struct LogTarget *t, ErrorData *edata, char *msgbuf);
 static void defineStringVariable(const char *name, const char *short_desc, char **value_addr);
 static void defineIntVariable(const char *name, const char *short_desc, int *value_addr);
@@ -398,7 +406,6 @@ _PG_init(void)
 		{
 			CODE   *c;
 
-			target->format_payload = format_syslog;
 			if (!target->syslog_facility)
 				target->syslog_facility = DEFAULT_SYSLOG_FACILITY;
 
@@ -406,7 +413,7 @@ _PG_init(void)
 			for (c = facilitynames; c->c_name && target->facility_id < 0; c++)
 				if (strcasecmp(c->c_name, target->syslog_facility) == 0)
 					target->facility_id = LOG_FAC(c->c_val);
-			
+
 			/* No valid facility found, skip the target */
 			if (target->facility_id < 0)
 			{
@@ -461,7 +468,7 @@ static void format_log_timestamp(void)
 #else
 	pglt = pg_localtime(&stamp_time, log_timezone);
 #endif
-	/* leave room for milliseconds... */
+	/* Leave room for milliseconds... */
 	pg_strftime(log_timestamp, FORMATTED_TS_LEN, "%Y-%m-%d %H:%M:%S     %Z", pglt);
 
 	/* 'paste' milliseconds into place... */
@@ -650,53 +657,6 @@ format_json(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 }
 
 /*
- * Format the payload as standard syslog message.
- * See: http://tools.ietf.org/html/rfc5424
- *
- * Stick to the fixed format here, ignore any field selections and customizations.
- */
-static void
-format_syslog(struct LogTarget *target, ErrorData *edata, char *msgbuf)
-{
-	int			pri, len, i;
-	int			severity = -1;
-	time_t		now;
-	struct tm  *gmt;
-	char		ts[32];
-
-	/* Map the postgres elevel to syslog severity */
-	int levels[][2] = {
-		{ DEBUG1, 7 }, { INFO, 6 }, { NOTICE, 5 }, { WARNING, 4},
-		{ ERROR, 3 }, { FATAL, 2 }, { PANIC, 0 },
-	};
-
-	for (i = 0; i < sizeof(levels)/sizeof(levels[0]) && severity < 0; i++)
-		if (edata->elevel <= levels[i][0])
-			severity = levels[i][1];
-
-	pri = target->facility_id * 8 + severity;
-
-	now = (time_t) log_tv.tv_sec;
-	gmt = gmtime(&now);
-	strftime(ts, sizeof(ts), "%F-%dT%H:%M:%SZ", gmt);
-
-	/*
-	 * Syslog message format:
-	 * PRI VERSION TS HOSTNAME APPNAME PROCID MSGID SDATA MSG
-	 */
-
-	/* header */
-	len = snprintf(msgbuf, MAX_MESSAGE_SIZE, "<%d>1 %s %s postgres %d %s ",
-		pri, ts, my_hostname, MyProcPid, "-");
-	
-	/* structured data - skip for now */
-	len += snprintf(msgbuf+len, MAX_MESSAGE_SIZE - len, "%s ", "-");
-
-	/* message payload */
-	len += snprintf(msgbuf+len, MAX_MESSAGE_SIZE - len, "%s", edata->message);
-}
-
-/*
  * Format the payload as set of netstrings. No fancy stuff, just
  * one field after another: elevel, sqlerrcode, user, database, host,
  * funcname, message, detail, hint, context, debug_query_string, timestamp
@@ -727,6 +687,166 @@ format_netstr(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 			append_netstr(&buf, &len, intbuf);
 		}
 	}
+}
+
+/*
+ * Format the syslog prefix
+ * See: http://tools.ietf.org/html/rfc5424
+ *
+ * Stick to the fixed format here, ignore any field selections and customizations.
+ */
+static int
+format_syslog_prefix(struct LogTarget *target, ErrorData *edata, char *msgbuf)
+{
+	int			pri, len, i;
+	int			severity = -1;
+	time_t		now;
+	struct tm  *gmt;
+	char		ts[32];
+
+	/* Map the postgres elevel to syslog severity */
+	int levels[][2] = {
+		{ DEBUG1, 7 }, { INFO, 6 }, { NOTICE, 5 }, { WARNING, 4},
+		{ ERROR, 3 }, { FATAL, 2 }, { PANIC, 0 },
+	};
+
+	for (i = 0; i < sizeof(levels)/sizeof(levels[0]) && severity < 0; i++)
+		if (edata->elevel <= levels[i][0])
+			severity = levels[i][1];
+
+	pri = target->facility_id * 8 + severity;
+
+	now = (time_t) log_tv.tv_sec;
+	gmt = gmtime(&now);
+	strftime(ts, sizeof(ts), "%F-%dT%H:%M:%SZ", gmt);
+
+	/*
+	 * Syslog message format:
+	 * PRI VERSION TS HOSTNAME APPNAME PROCID MSGID SDATA MSG
+	 */
+
+	/* Header */
+	len = snprintf(msgbuf, MAX_SYSLOG_MSG_SIZE, "<%d>1 %s %s postgres %d %s ",
+		pri, ts, my_hostname, MyProcPid, "-");
+
+	/* Structured data - skip for now */
+	len += snprintf(msgbuf+len, MAX_SYSLOG_MSG_SIZE - len, "%s ", "-");
+
+	/* Message payload */
+	return len;
+}
+
+
+/*
+ * Send syslog messages. Function takes care of splitting message to smaller chunks.
+ */
+static void
+send_syslog (struct LogTarget *target, ErrorData *edata)
+{
+	static unsigned long	seq = 0;
+	int						chunk_nr = 1;
+	int						prefixlen, len;
+	char					msgbuf[MAX_SYSLOG_MSG_SIZE];
+	int						i;
+
+	if (log_timestamp[0] == '\0')
+		format_log_timestamp();
+
+	prefixlen = len = format_syslog_prefix(target, edata, msgbuf);
+
+	seq++;
+
+	len += snprintf(msgbuf+len, MAX_SYSLOG_MSG_SIZE - len, "[%lu-%d]", seq, chunk_nr);
+
+	for (i = 0; i < n_field_names; i++)
+	{
+		int				v, intval = -1;
+		const char	   *strval = NULL;
+		const char     *nlpos = NULL;
+		int				nlindex = MAX_SYSLOG_MSG_SIZE;
+		char			intbuf[64];
+		char			nullbuf[10];
+
+		v = extract_field_value(field_names[i], edata, &strval, &intval);
+		if (v == FV_INT)
+		{
+			snprintf(intbuf, sizeof(intbuf), "%d", intval);
+
+			strval = intbuf;
+		}
+
+		/* Add value in case it is missing */
+		if (strval == NULL || strval[0] == '\0')
+		{
+			if (
+					strcmp(field_names[i],"username") == 0 ||
+					strcmp(field_names[i],"database") == 0 ||
+					strcmp(field_names[i],"remotehost") == 0
+			   )
+				snprintf(nullbuf, sizeof(nullbuf), "[unknown]");
+			else
+				nullbuf[0] = '\0';
+
+			strval = nullbuf;
+
+		}
+
+		/* Check newline in data field */
+		if (strval != NULL)
+			nlpos = strchr(strval, '\n');
+
+		if (nlpos != NULL)
+			nlindex = nlpos - strval;
+
+		len += snprintf(msgbuf+len, Min(MAX_SYSLOG_MSG_SIZE - len, nlindex + 2), " %s", strval);
+
+		/* Handle truncated message */
+		while (len >= MAX_SYSLOG_MSG_SIZE - 1 || nlpos != NULL)
+		{
+			int wr_len, mb_len;
+
+			/* Determine how many characters were written from data field */
+			wr_len = Min((strlen(strval) - (len - MAX_SYSLOG_MSG_SIZE) - 1), nlindex);
+			/* Check multibyte */
+			mb_len = pg_mbcliplen(strval, wr_len, wr_len);
+			if (mb_len < wr_len) {
+				msgbuf[Min(MAX_SYSLOG_MSG_SIZE - 1,len) - (wr_len - mb_len)] = '\0';
+				wr_len = mb_len;
+			}
+			/* Send message chunk */
+			if (sendto(target->log_socket, msgbuf, strlen(msgbuf), 0,
+						(struct sockaddr *) &target->si_remote, sizeof(target->si_remote)) < 0)
+				tell("sendto: %s\n", strerror(errno));
+
+			/* Start new chunk */
+			chunk_nr++;
+
+			/* Remaining data field */
+			strval = strval + wr_len;
+
+			/* Skip newline */
+			if (strval[0] == '\n')
+				strval++;
+
+			/* Check newline again */
+			nlpos = strchr(strval, '\n');
+			if (nlpos != NULL)
+				nlindex = nlpos - strval;
+			else
+				nlindex = MAX_SYSLOG_MSG_SIZE;
+
+			len = prefixlen;
+			len += snprintf(msgbuf+len, MAX_SYSLOG_MSG_SIZE - len, "[%lu-%d]", seq, chunk_nr);
+			len += snprintf(msgbuf+len, Min(MAX_SYSLOG_MSG_SIZE - len,nlindex + 2), " %s", strval);
+
+		}
+	}
+
+	/* Send the last part */
+	if (sendto(target->log_socket, msgbuf, strlen(msgbuf), 0,
+				(struct sockaddr *) &target->si_remote, sizeof(target->si_remote)) < 0)
+		tell("sendto: %s\n", strerror(errno));
+
 }
 
 
@@ -790,11 +910,19 @@ emit_log(ErrorData *edata)
 		/* Format the message if any of the filters match */
 		if (filter_match)
 		{
-			t->format_payload(t, edata, msgbuf);
-
-			if (sendto(t->log_socket, msgbuf, strlen(msgbuf), 0,
-					   (struct sockaddr *) &t->si_remote, sizeof(t->si_remote)) < 0)
-				tell("sendto: %s\n", strerror(errno));
+			/*
+			 * Syslog has much smaller max message size
+			 * so we use different approach for syslog messages
+			 */
+			if (strcmp(t->log_format, "syslog") == 0)
+				send_syslog(t, edata);
+			else
+			{
+				t->format_payload(t, edata, msgbuf);
+				if (sendto(t->log_socket, msgbuf, strlen(msgbuf), 0,
+						   (struct sockaddr *) &t->si_remote, sizeof(t->si_remote)) < 0)
+					tell("sendto: %s\n", strerror(errno));
+			}
 		}
 	}
 }
