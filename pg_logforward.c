@@ -635,9 +635,6 @@ format_json(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 	*buf = '\0';
 	len = MAX_MESSAGE_SIZE;
 
-	if (log_timestamp[0] == '\0')
-		format_log_timestamp();
-
 	append_string(&buf, &len, "{ ");
 
 	for (i = 0; i < n_field_names; i++)
@@ -646,6 +643,9 @@ format_json(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 		int			intval = -1;
 		int			v;
 		const char *strval = NULL;
+
+		if (strcmp(field_names[i], "timestamp") == 0 && log_timestamp[0] == '\0')
+			format_log_timestamp();
 
 		if ((v = extract_field_value(field_names[i], edata, &strval, &intval)) == FV_STR) 
 			append_json_str(&buf, &len, field_names[i], strval, !last_field);
@@ -669,13 +669,14 @@ format_netstr(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 	int			i;
 
 	*buf = '\0';
-	if (log_timestamp[0] == '\0')
-		format_log_timestamp();
 
 	for (i = 0; i < n_field_names; i++)
 	{
 		int			v, intval = -1;
 		const char *strval = NULL;
+
+		if (strcmp(field_names[i], "timestamp") == 0 && log_timestamp[0] == '\0')
+			format_log_timestamp();
 
 		if ((v = extract_field_value(field_names[i], edata, &strval, &intval)) == FV_STR) 
 			append_netstr(&buf, &len, strval);
@@ -749,9 +750,6 @@ send_syslog (struct LogTarget *target, ErrorData *edata)
 	char					msgbuf[MAX_SYSLOG_MSG_SIZE];
 	int						i;
 
-	if (log_timestamp[0] == '\0')
-		format_log_timestamp();
-
 	prefixlen = len = format_syslog_prefix(target, edata, msgbuf);
 
 	seq++;
@@ -766,6 +764,9 @@ send_syslog (struct LogTarget *target, ErrorData *edata)
 		int				nlindex = MAX_SYSLOG_MSG_SIZE;
 		char			intbuf[64];
 		char			nullbuf[10];
+
+		if (strcmp(field_names[i], "timestamp") == 0 && log_timestamp[0] == '\0')
+			format_log_timestamp();
 
 		v = extract_field_value(field_names[i], edata, &strval, &intval);
 		if (v == FV_INT)
