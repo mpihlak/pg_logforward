@@ -68,9 +68,16 @@ typedef struct LogTarget {
 	char			   *syslog_facility;
 	int					facility_id;
 
+	/* Log fields */
+	char			   *field_names[MAX_CUSTOM_FIELDS];
+	int					n_field_names;
+
 	/* Log filtering */
 	int					min_elevel;
 	List			   *filter_list;			/* Filtering conditions for this target */
+
+	/* GUC placeholder for log fields */
+	char			   *_log_fields;
 
 	/* GUC placeholders for filters */
 	char			   *_message_filter;
@@ -101,7 +108,6 @@ static void append_json_int(char **buf, size_t *max, const char *key, int val, b
 static emit_log_hook_type	prev_emit_log_hook = NULL;
 static LogTarget		   *log_targets = NULL;
 static char				   *log_target_names = "";
-static char				   *log_field_names = "";
 static char				   *instance_label = "";
 static char				   *log_username = NULL;
 static char				   *log_database = NULL;
@@ -110,13 +116,11 @@ static char					my_hostname[64];
 static struct timeval		log_tv;
 static char					log_timestamp[FORMATTED_TS_LEN];
 
-static char				   *field_names[] = {
+static const char		   *default_field_names[] = {
 								"username", "database", "remotehost", "debug_query_string", "elevel",
 								"funcname", "sqlerrcode", "message", "detail", "hint",
 								"context", "instance_label", "timestamp",
 							};
-
-static int					n_field_names = sizeof(field_names) / sizeof(*field_names);
 
 
 /* Convenience wrapper for DefineCustomStringVariable */
@@ -277,29 +281,6 @@ _PG_init(void)
 		instance_label = pstrdup(buf);
 	}
 
-	/*
-	 * Override logged fields if needed
-	 */
-	defineStringVariable("logforward.log_fields",
-						 "Field names for customizing forwarded log",
-						 &log_field_names);
-	if (log_field_names && log_field_names[0])
-	{
-		char    *ptr, *ftok = NULL;
-		char    *field_names_str = pstrdup(log_field_names);
-
-		/* Custom fields defined, override the default list */
-		n_field_names = 0;
-		for (ptr = strtok_r(field_names_str, ", ", &ftok); ptr != NULL; ptr = strtok_r(NULL, ", ", &ftok))
-			field_names[n_field_names++] = ptr;
-	}
-
-	/*
-	 * Tell what fields we are configured to log
-	 */
-	tell("Logging configured for the following %d fields:\n", n_field_names);
-	for (i = 0; i < n_field_names; i++)
-		tell("field %d: %s\n", i, field_names[i]);
 
 	/*
 	 * Set up the log targets.
@@ -321,6 +302,9 @@ _PG_init(void)
 		target->log_format = DEFAULT_PAYLOAD_FORMAT;
 		target->syslog_facility = DEFAULT_SYSLOG_FACILITY;
 		target->facility_id = -1;
+		memcpy(target->field_names, default_field_names, sizeof(default_field_names));
+		target->n_field_names = sizeof(default_field_names) / sizeof(*default_field_names);
+		target->_log_fields = NULL;
 
 		/* Obtain the target specific GUC settings */
 		snprintf(buf, sizeof(buf), "logforward.%s_host", tgname);
@@ -354,6 +338,10 @@ _PG_init(void)
 		snprintf(buf, sizeof(buf), "logforward.%s_facility", tgname);
 		defineStringVariable(buf, "Syslog facility for syslog targets",
 							 &target->syslog_facility);
+
+		snprintf(buf, sizeof(buf), "logforward.%s_log_fields", tgname);
+		defineStringVariable(buf, "Field names for customizing forwarded log",
+							 &target->_log_fields);
 
 		/*
 		 * Set up the logging socket
@@ -431,6 +419,33 @@ _PG_init(void)
 		tell("forwarding to target %s: %s:%d, format: %s\n",
 				tgname, target->remote_ip, target->remote_port, target->log_format);
 
+		/* Override logged fields if needed */
+		if (target->_log_fields && target->_log_fields[0])
+		{
+			char    *ptr, *ftok = NULL;
+			char    *field_names_str = pstrdup(target->_log_fields);
+
+			/* Custom fields defined, override the default list */
+			target->n_field_names = 0;
+			for (ptr = strtok_r(field_names_str, ", ", &ftok); ptr != NULL; ptr = strtok_r(NULL, ", ", &ftok))
+			{
+				if (target->n_field_names == MAX_CUSTOM_FIELDS)
+				{
+					tell("max custom field limit(%d) has been reached\n", MAX_CUSTOM_FIELDS);
+					break;
+				}
+
+				target->field_names[target->n_field_names++] = ptr;
+			}
+		}
+
+		/*
+		 * Tell what fields we are configured to log
+		 */
+		tell("forwarding to target %s following %d fields:\n", tgname,target->n_field_names);
+		for (i = 0; i < target->n_field_names; i++)
+			tell("field %d: %s\n", i, target->field_names[i]);
+
 		/* Append the new target to the list of targets */
 		if (tail)
 			tail->next = target;
@@ -441,6 +456,9 @@ _PG_init(void)
 		add_filters(target, FILTER_FUNCNAME, target->_funcname_filter);
 		add_filters(target, FILTER_MESSAGE, target->_message_filter);
 		add_filters(target, FILTER_USERNAME, target->_username_filter);
+
+
+
 	}
 
 	pfree(target_names);
@@ -637,20 +655,20 @@ format_json(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 
 	append_string(&buf, &len, "{ ");
 
-	for (i = 0; i < n_field_names; i++)
+	for (i = 0; i < target->n_field_names; i++)
 	{
-		bool		last_field = (i == n_field_names - 1);
+		bool		last_field = (i == target->n_field_names - 1);
 		int			intval = -1;
 		int			v;
 		const char *strval = NULL;
 
-		if (strcmp(field_names[i], "timestamp") == 0 && log_timestamp[0] == '\0')
+		if (strcmp(target->field_names[i], "timestamp") == 0 && log_timestamp[0] == '\0')
 			format_log_timestamp();
 
-		if ((v = extract_field_value(field_names[i], edata, &strval, &intval)) == FV_STR) 
-			append_json_str(&buf, &len, field_names[i], strval, !last_field);
+		if ((v = extract_field_value(target->field_names[i], edata, &strval, &intval)) == FV_STR) 
+			append_json_str(&buf, &len, target->field_names[i], strval, !last_field);
 		else if (v == FV_INT)
-			append_json_int(&buf, &len, field_names[i], intval, !last_field);
+			append_json_int(&buf, &len, target->field_names[i], intval, !last_field);
 	}
 
 	append_string(&buf, &len, " }");
@@ -670,15 +688,15 @@ format_netstr(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 
 	*buf = '\0';
 
-	for (i = 0; i < n_field_names; i++)
+	for (i = 0; i < target->n_field_names; i++)
 	{
 		int			v, intval = -1;
 		const char *strval = NULL;
 
-		if (strcmp(field_names[i], "timestamp") == 0 && log_timestamp[0] == '\0')
+		if (strcmp(target->field_names[i], "timestamp") == 0 && log_timestamp[0] == '\0')
 			format_log_timestamp();
 
-		if ((v = extract_field_value(field_names[i], edata, &strval, &intval)) == FV_STR) 
+		if ((v = extract_field_value(target->field_names[i], edata, &strval, &intval)) == FV_STR) 
 			append_netstr(&buf, &len, strval);
 		else if (v == FV_INT)
 		{
@@ -756,7 +774,7 @@ send_syslog (struct LogTarget *target, ErrorData *edata)
 
 	len += snprintf(msgbuf+len, MAX_SYSLOG_MSG_SIZE - len, "[%lu-%d]", seq, chunk_nr);
 
-	for (i = 0; i < n_field_names; i++)
+	for (i = 0; i < target->n_field_names; i++)
 	{
 		int				v, intval = -1;
 		const char	   *strval = NULL;
@@ -765,10 +783,10 @@ send_syslog (struct LogTarget *target, ErrorData *edata)
 		char			intbuf[64];
 		char			nullbuf[10];
 
-		if (strcmp(field_names[i], "timestamp") == 0 && log_timestamp[0] == '\0')
+		if (strcmp(target->field_names[i], "timestamp") == 0 && log_timestamp[0] == '\0')
 			format_log_timestamp();
 
-		v = extract_field_value(field_names[i], edata, &strval, &intval);
+		v = extract_field_value(target->field_names[i], edata, &strval, &intval);
 		if (v == FV_INT)
 		{
 			snprintf(intbuf, sizeof(intbuf), "%d", intval);
@@ -780,9 +798,9 @@ send_syslog (struct LogTarget *target, ErrorData *edata)
 		if (strval == NULL || strval[0] == '\0')
 		{
 			if (
-					strcmp(field_names[i],"username") == 0 ||
-					strcmp(field_names[i],"database") == 0 ||
-					strcmp(field_names[i],"remotehost") == 0
+					strcmp(target->field_names[i],"username") == 0 ||
+					strcmp(target->field_names[i],"database") == 0 ||
+					strcmp(target->field_names[i],"remotehost") == 0
 			   )
 				snprintf(nullbuf, sizeof(nullbuf), "[unknown]");
 			else
