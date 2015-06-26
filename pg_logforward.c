@@ -93,6 +93,7 @@ static void tell(const char *fmt, ...) __attribute__((format(PG_PRINTF_ATTRIBUTE
 static void emit_log(ErrorData *edata);
 static void format_json(struct LogTarget *t, ErrorData *edata, char *msgbuf);
 static int format_syslog_prefix(struct LogTarget *t, ErrorData *edata, char *msgbuf);
+static void send_syslog (struct LogTarget *target, ErrorData *edata);
 static void format_netstr(struct LogTarget *t, ErrorData *edata, char *msgbuf);
 static void defineStringVariable(const char *name, const char *short_desc, char **value_addr);
 static void defineIntVariable(const char *name, const char *short_desc, int *value_addr);
@@ -103,6 +104,7 @@ static void append_netstr(char **buf, size_t *max, const char *str);
 static FieldValueType extract_field_value(const char *field_name, ErrorData *edata, const char **strval, int *intval);
 static void append_json_str(char **buf, size_t *max, const char *key, const char *val, bool addComma);
 static void append_json_int(char **buf, size_t *max, const char *key, int val, bool addComma);
+static int append_syslog_string(char *buf, const char **value, size_t *len);
 
 
 static emit_log_hook_type	prev_emit_log_hook = NULL;
@@ -567,6 +569,57 @@ append_json_int(char **buf, size_t *max, const char *key, int val, bool addComma
 }
 
 /*
+ * Append string to syslog message buffer. Checks newline and multibyte.
+ * Return 1 if message was split otherwise 0.
+ */
+static int
+append_syslog_string(char *buf, const char **value, size_t *len)
+{
+	int retval = 1;
+	char *buf_start = buf;
+	int initial_len = *len;
+	int wr_len, mb_diff;
+
+    while (1)
+    {
+		if (*len >= MAX_SYSLOG_MSG_SIZE -1)
+		{
+			/* Check multibyte */
+			wr_len = *len - initial_len;
+			mb_diff = wr_len - pg_mbcliplen(buf_start, wr_len, wr_len);
+			if (mb_diff > 0)
+			{
+				buf -= mb_diff;
+				*len-= mb_diff;
+				*value -= mb_diff;
+			}
+			break;
+		}
+
+        if (**value == '\0')
+		{
+			retval = 0;
+            break;
+		}
+
+        if (**value == '\n')
+        {
+			/* Skip newline */
+			(*value)++;
+            break;
+        }
+
+        *buf++ = *(*value)++;
+
+        (*len)++;
+    }
+
+    *buf = '\0';
+
+    return retval;
+}
+
+/*
  * Produce a JSON string literal.
  */
 static void
@@ -755,7 +808,6 @@ format_syslog_prefix(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 	return len;
 }
 
-
 /*
  * Send syslog messages. Function takes care of splitting message to smaller chunks.
  */
@@ -764,7 +816,7 @@ send_syslog (struct LogTarget *target, ErrorData *edata)
 {
 	static unsigned long	seq = 0;
 	int						chunk_nr = 1;
-	int						prefixlen, len;
+	size_t					prefixlen, len;
 	char					msgbuf[MAX_SYSLOG_MSG_SIZE];
 	int						i;
 
@@ -774,95 +826,69 @@ send_syslog (struct LogTarget *target, ErrorData *edata)
 
 	len += snprintf(msgbuf+len, MAX_SYSLOG_MSG_SIZE - len, "[%lu-%d]", seq, chunk_nr);
 
-	for (i = 0; i < target->n_field_names; i++)
+	/*
+	 * We have doubled the field number to add space before each field.
+	 * If we have odd field number then field will be added.
+	 */
+	for (i = 0; i < target->n_field_names * 2; i++)
 	{
 		int				v, intval = -1;
 		const char	   *strval = NULL;
-		const char     *nlpos = NULL;
-		int				nlindex = MAX_SYSLOG_MSG_SIZE;
 		char			intbuf[64];
-		char			nullbuf[10];
+		char			tmpbuf[10] = " ";
 
-		if (strcmp(target->field_names[i], "timestamp") == 0 && log_timestamp[0] == '\0')
-			format_log_timestamp();
-
-		v = extract_field_value(target->field_names[i], edata, &strval, &intval);
-		if (v == FV_INT)
+		if (i % 2)
 		{
-			snprintf(intbuf, sizeof(intbuf), "%d", intval);
+			int fn_i = i/2;
 
-			strval = intbuf;
-		}
+			if (strcmp(target->field_names[fn_i], "timestamp") == 0 && log_timestamp[0] == '\0')
+				format_log_timestamp();
 
-		/* Add value in case it is missing */
-		if (strval == NULL || strval[0] == '\0')
-		{
-			if (
-					strcmp(target->field_names[i],"username") == 0 ||
-					strcmp(target->field_names[i],"database") == 0 ||
-					strcmp(target->field_names[i],"remotehost") == 0
-			   )
-				snprintf(nullbuf, sizeof(nullbuf), "[unknown]");
-			else
-				nullbuf[0] = '\0';
-
-			strval = nullbuf;
-
-		}
-
-		/* Check newline in data field */
-		if (strval != NULL)
-			nlpos = strchr(strval, '\n');
-
-		if (nlpos != NULL)
-			nlindex = nlpos - strval;
-
-		len += snprintf(msgbuf+len, Min(MAX_SYSLOG_MSG_SIZE - len, nlindex + 2), " %s", strval);
-
-		/* Handle truncated message */
-		while (len >= MAX_SYSLOG_MSG_SIZE - 1 || nlpos != NULL)
-		{
-			int wr_len, mb_len;
-
-			/* Determine how many characters were written from data field */
-			wr_len = Min((strlen(strval) - (len - MAX_SYSLOG_MSG_SIZE) - 1), nlindex);
-			/* Check multibyte */
-			mb_len = pg_mbcliplen(strval, wr_len, wr_len);
-			if (mb_len < wr_len) {
-				msgbuf[Min(MAX_SYSLOG_MSG_SIZE - 1,len) - (wr_len - mb_len)] = '\0';
-				wr_len = mb_len;
+			v = extract_field_value(target->field_names[fn_i], edata, &strval, &intval);
+			if (v == FV_INT)
+			{
+				snprintf(intbuf, sizeof(intbuf), "%d", intval);
+				strval = intbuf;
 			}
+
+			/* Add value in case it is missing */
+			if (strval == NULL || *strval == '\0')
+			{
+				if (
+						strcmp(target->field_names[fn_i],"username") == 0 ||
+						strcmp(target->field_names[fn_i],"database") == 0 ||
+						strcmp(target->field_names[fn_i],"remotehost") == 0
+				   )
+					snprintf(tmpbuf, sizeof(tmpbuf), "[unknown]");
+				else
+					tmpbuf[0] = '\0';
+
+				strval = tmpbuf;
+			}
+		}
+		else
+		{
+			/* Add space before each new field */
+			strval = tmpbuf;
+		}
+
+		while (append_syslog_string(msgbuf+len,&strval,&len))
+		{
 			/* Send message chunk */
-			if (sendto(target->log_socket, msgbuf, strlen(msgbuf), 0,
+			if (sendto(target->log_socket, msgbuf, len, 0,
 						(struct sockaddr *) &target->si_remote, sizeof(target->si_remote)) < 0)
 				tell("sendto: %s\n", strerror(errno));
 
 			/* Start new chunk */
 			chunk_nr++;
 
-			/* Remaining data field */
-			strval = strval + wr_len;
-
-			/* Skip newline */
-			if (strval[0] == '\n')
-				strval++;
-
-			/* Check newline again */
-			nlpos = strchr(strval, '\n');
-			if (nlpos != NULL)
-				nlindex = nlpos - strval;
-			else
-				nlindex = MAX_SYSLOG_MSG_SIZE;
-
 			len = prefixlen;
-			len += snprintf(msgbuf+len, MAX_SYSLOG_MSG_SIZE - len, "[%lu-%d]", seq, chunk_nr);
-			len += snprintf(msgbuf+len, Min(MAX_SYSLOG_MSG_SIZE - len,nlindex + 2), " %s", strval);
-
+			len += snprintf(msgbuf+len, MAX_SYSLOG_MSG_SIZE - len, "[%lu-%d] ", seq, chunk_nr);
 		}
 	}
 
 	/* Send the last part */
-	if (sendto(target->log_socket, msgbuf, strlen(msgbuf), 0,
+	if (sendto(target->log_socket, msgbuf, len, 0,
 				(struct sockaddr *) &target->si_remote, sizeof(target->si_remote)) < 0)
 		tell("sendto: %s\n", strerror(errno));
 
