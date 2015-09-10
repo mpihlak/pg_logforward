@@ -26,19 +26,11 @@ shared_preload_libraries = 'pg_logforward'	# requires restart
 
 logforward.target_names = 'syslog,jsonsrv,netstr'
 
-# By default all fields are logged. Setting logforward.log_fields enables to
-# omit certain fields or change the order of fields for netstr and JSON 
-# formats. syslog still uses hardcoded format.
-
-#logforward.log_fields = "username, database, remotehost, debug_query_string,
-#                         elevel, funcname, sqlerrcode, message, detail, hint,
-#                         context, instance_label, timestamp"
-
-logforward.syslog_format = 'syslog'     
+logforward.syslog_format = 'syslog'
 logforward.syslog_host = '127.0.0.1'
 logforward.syslog_port = 23456
 logforward.syslog_min_elevel = 19               # WARNING and above
-logforward.syslog_facility = 'local1'     
+logforward.syslog_facility = 'local1'
 
 logforward.jsonsrv_format = 'json'
 logforward.jsonsrv_host = '127.0.0.1'
@@ -51,6 +43,13 @@ logforward.netstr_port = 23458
 logforward.netstr_message_filter = 'foo|bar|baz'        # match any 3
 logforward.netstr_funcname_filter = 'exec_simple_query' # filter on the C function
                                                         # that calls ereport()
+
+# By default all fields are logged. Setting logforward.*_log_fields enables to
+# omit certain fields or change the order of fields.
+
+#logforward.netstr_log_fields = "username, database, remotehost, debug_query_string,
+#                         elevel, funcname, sqlerrcode, message, detail, hint,
+#                         context, instance_label, timestamp"
 
 Note that you need to copy the shared library also to $libdir/plugins if you
 are planning to use local_preload_libraries instead of shared_preload_libraries.
