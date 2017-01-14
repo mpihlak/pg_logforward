@@ -877,7 +877,7 @@ format_syslog_prefix(struct LogTarget *target, ErrorData *edata, char *msgbuf)
 
 	now = (time_t) log_tv.tv_sec;
 	gmt = gmtime(&now);
-	strftime(ts, sizeof(ts), "%F-%dT%H:%M:%SZ", gmt);
+	strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", gmt);
 
 	/*
 	 * Syslog message format:
